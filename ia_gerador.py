@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # lê o arquivo .env na raiz do projeto, se existir
 
-MODEL = "gpt-5.6"  # alias sempre apontando para a versão mais recente pinada de GPT-5.6 (gpt-4o virou legado)
+MODEL = "gpt-5.6-terra"  # linha atual da OpenAI (gpt-4o virou legado); terra = bom equilíbrio custo/qualidade
 MAX_TENTATIVAS = 4
 
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -70,11 +70,7 @@ def _chamar_api(prompt: str):
     return dados["questoes"]
 
 
-ULTIMO_ERRO = None  # guarda a mensagem da última falha, para a UI poder exibi-la
-
-
 def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> list:
-    global ULTIMO_ERRO
     prompt = montar_prompt(banca, nivel, tema, qtd, evitar)
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
@@ -88,7 +84,6 @@ def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = N
             print(f"[{tema}] Rate limit. Aguardando {espera}s...")
             time.sleep(espera)
         except Exception as e:
-            ULTIMO_ERRO = str(e)
             print(f"[{tema}] Falha na tentativa {tentativa}: {e}")
             if tentativa < MAX_TENTATIVAS:
                 time.sleep(15)
