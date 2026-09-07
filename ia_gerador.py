@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # lê o arquivo .env na raiz do projeto, se existir
 
-MODEL = "gpt-4o"  # troque para "gpt-4o-mini" se quiser mais barato/rápido
+MODEL = "gpt-5.6-terra"  # linha atual da OpenAI (gpt-4o virou legado); terra = bom equilíbrio custo/qualidade
 MAX_TENTATIVAS = 4
 
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -39,26 +39,35 @@ para a banca {banca}, nível {nivel}, sobre: {tema}.
 
 Cada questão deve ter 5 alternativas (A, B, C, D, E), apenas uma correta.
 {bloco_evitar}
-SAÍDA APENAS EM JSON (ARRAY), sem texto adicional, sem markdown, no formato:
-[
-  {{
-    "pergunta": "...",
-    "opcoes": ["texto A", "texto B", "texto C", "texto D", "texto E"],
-    "correta": 0,
-    "comentario": "O Distrator: ... | Lógica: ... | Flash-Card: ..."
-  }}
-]"""
+Responda em JSON, com um objeto contendo a chave "questoes", cujo valor é um
+array no formato abaixo. Não inclua texto adicional nem markdown:
+{{
+  "questoes": [
+    {{
+      "pergunta": "...",
+      "opcoes": ["texto A", "texto B", "texto C", "texto D", "texto E"],
+      "correta": 0,
+      "comentario": "O Distrator: ... | Lógica: ... | Flash-Card: ..."
+    }}
+  ]
+}}"""
 
 
 def _chamar_api(prompt: str):
+    # response_format json_object: a OpenAI EXIGE que a raiz da resposta seja
+    # um objeto {} (não aceita array [] solto) — por isso o prompt pede um
+    # objeto com a chave "questoes", em vez do array direto de antes.
+    # Isso blinda contra erros de formatação (texto extra, cercas de markdown
+    # ```json```, JSON truncado) que antes exigiam o replace() manual abaixo.
     resp = client.chat.completions.create(
         model=MODEL,
         max_tokens=8000,
         messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
     )
     texto = resp.choices[0].message.content
-    texto_limpo = texto.replace("```json", "").replace("```", "").strip()
-    return json.loads(texto_limpo)
+    dados = json.loads(texto)
+    return dados["questoes"]
 
 
 def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> list:
