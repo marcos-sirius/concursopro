@@ -58,13 +58,22 @@ SCHEMA_QUESTOES = {
                     "opcoes": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "minItems": 5,
-                        "maxItems": 5,
+                        # OBS: "minItems"/"maxItems" foram removidos daqui de
+                        # propósito. O modo strict:true da OpenAI NÃO suporta
+                        # essas palavras-chave — incluí-las faz a API rejeitar
+                        # a chamada inteira com erro 400 "Invalid schema" em
+                        # TODAS as tentativas, sem exceção (foi exatamente o
+                        # bug que causava "Falhou ao gerar" em tudo). A
+                        # validação de "exatamente 5 alternativas" já é feita
+                        # em Python por _validar_estrutura_questao(), então
+                        # nada de segurança se perde.
                     },
                     "correta": {
                         "type": "integer",
-                        "minimum": 0,
-                        "maximum": 4,
+                        # mesma observação: "minimum"/"maximum" também não são
+                        # suportados em strict mode. A checagem 0<=correta<=4
+                        # já é garantida indiretamente por _gabarito_consistente()
+                        # (compara o índice com a letra do enum abaixo).
                     },
                     "letra_gabarito": {
                         "type": "string",
@@ -100,8 +109,8 @@ SCHEMA_REVISAO = {
         },
         "correta": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 4,
+            # "minimum"/"maximum" removidos — não suportados em strict mode
+            # (ver comentário equivalente em SCHEMA_QUESTOES acima).
         },
         "letra_gabarito": {
             "type": "string",
