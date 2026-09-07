@@ -1,13 +1,17 @@
 """
 Simulador EARA — versão web (Streamlit + Google Drive via token de longa duração)
 ============================================================================
+
 Três áreas:
-  1. "Responder simulado" — PÚBLICA, sem login. Qualquer pessoa com o link
-     escolhe um estudo + número de simulação, digita o nome e responde.
-  2. "Gestão de estudos" — protegida por senha (admin_password nos Secrets).
-     Criar estudos, ressincronizar eixos, gerar novos simulados via IA.
-  3. "Desempenho" — protegida por senha. Dashboard com o histórico de
-     respostas de todo mundo, cruzando por participante/eixo/tema/simulado.
+
+1. "Responder simulado" — PÚBLICA, sem login. Qualquer pessoa com o link
+   escolhe um estudo + número de simulação, digita o nome e responde.
+
+2. "Gestão de estudos" — protegida por senha (admin_password nos Secrets).
+   Criar estudos, ressincronizar eixos, gerar novos simulados via IA.
+
+3. "Desempenho" — protegida por senha. Dashboard com o histórico de
+   respostas de todo mundo, cruzando por participante/eixo/tema/simulado.
 
 Secrets necessários (.streamlit/secrets.toml local, ou "Settings > Secrets"
 no Streamlit Community Cloud):
@@ -24,6 +28,7 @@ no Streamlit Community Cloud):
     client_secret = "SUBSTITUA"
     refresh_token = "SUBSTITUA"
 """
+
 import os
 
 import streamlit as st
@@ -81,6 +86,7 @@ def pagina_responder():
         return
 
     st.divider()
+
     respostas_usuario = {}
     letras = ["A", "B", "C", "D", "E"]
 
@@ -93,8 +99,8 @@ def pagina_responder():
                 label_visibility="collapsed", index=None,
             )
             respostas_usuario[i] = opcoes_exibidas.index(escolha) if escolha else None
-            st.write("")
 
+        st.write("")
         enviar = st.form_submit_button("Enviar respostas", type="primary")
 
     if enviar:
@@ -138,9 +144,22 @@ def pagina_gestao():
         admin_auth.logout()
         st.rerun()
 
+    # --- feedback que precisa sobreviver ao st.rerun() da ação anterior ---
+    if "msg_sucesso" in st.session_state:
+        st.success(st.session_state.pop("msg_sucesso"))
+
     estudos = emd.listar_estudos()
     opcoes = ["➕ Novo estudo"] + [nome for nome, _ in estudos]
-    escolha = st.selectbox("Estudo", opcoes)
+
+    # se acabamos de criar um estudo, já abre a página nele em vez de
+    # voltar para "➕ Novo estudo" com o formulário vazio
+    indice_padrao = 0
+    if "estudo_recem_criado" in st.session_state:
+        nome_criado = st.session_state.pop("estudo_recem_criado")
+        if nome_criado in opcoes:
+            indice_padrao = opcoes.index(nome_criado)
+
+    escolha = st.selectbox("Estudo", opcoes, index=indice_padrao)
 
     if escolha == "➕ Novo estudo":
         with st.form("form_novo_estudo"):
@@ -163,7 +182,9 @@ def pagina_gestao():
             config, folder_id = emd.criar_estudo(nome_estudo, banca, nivel, eixos)
             st.session_state["estudo_folder_id"] = folder_id
             st.session_state["estudo_config"] = config
-            st.success(f"Estudo '{nome_estudo}' criado! Selecione-o na lista acima.")
+            # guardados no session_state para sobreviver ao rerun abaixo
+            st.session_state["msg_sucesso"] = f"Estudo '{nome_estudo}' criado com sucesso! ✅"
+            st.session_state["estudo_recem_criado"] = nome_estudo
             st.rerun()
         return
 
@@ -171,7 +192,6 @@ def pagina_gestao():
     if st.session_state.get("estudo_folder_id") != folder_id:
         st.session_state["estudo_folder_id"] = folder_id
         st.session_state["estudo_config"] = emd.carregar_config(folder_id)
-
     config = st.session_state["estudo_config"]
 
     st.subheader(config["nome_estudo"])
@@ -190,7 +210,7 @@ def pagina_gestao():
                 return
             config = emd.ressincronizar_eixos(folder_id, config, novos_eixos)
             st.session_state["estudo_config"] = config
-            st.success("Eixos/temas atualizados com sucesso.")
+            st.session_state["msg_sucesso"] = "Eixos/temas atualizados com sucesso."
             st.rerun()
 
     st.divider()
@@ -209,7 +229,7 @@ def pagina_gestao():
                 blocos_eixo = []
                 for tema, qtd_tema in distribuicao.items():
                     evitar = em.perguntas_ja_usadas(wb, eixo, tema=tema, limite=30)
-                    st.write(f"　↳ {qtd_tema} questão(ões) — {tema[:70]}")
+                    st.write(f"  ↳ {qtd_tema} questão(ões) — {tema[:70]}")
                     questoes = ia.gerar_bloco(
                         banca=config["banca"], nivel=config["nivel"], tema=tema,
                         qtd=qtd_tema, evitar=evitar, tamanho_bloco=dados.get("tamanho_bloco", 10),
@@ -217,22 +237,23 @@ def pagina_gestao():
                     if questoes:
                         blocos_eixo.append((tema, questoes))
                     else:
-                        st.write(f"　⚠️ Falhou ao gerar: {tema}")
+                        st.write(f"  ⚠️ Falhou ao gerar: {tema}")
 
                 todas_questoes_eixo = [q for _, qs in blocos_eixo for q in qs]
                 if todas_questoes_eixo:
                     ia.balancear_gabaritos(todas_questoes_eixo)
 
                 if not blocos_eixo:
-                    st.write(f"　⚠️ Nenhuma questão gerada para {eixo} — guia ficará vazia.")
+                    st.write(f"  ⚠️ Nenhuma questão gerada para {eixo} — guia ficará vazia.")
                     em.resetar_guia_eixo(wb, eixo)
                     continue
 
                 em.resetar_guia_eixo(wb, eixo)
                 for tema, questoes in blocos_eixo:
                     em.gravar_questoes_no_eixo(wb, eixo, tema, questoes)
+
                 eixos_questoes[eixo] = blocos_eixo
-                st.write(f"　✓ {len(todas_questoes_eixo)} questões gravadas ({len(blocos_eixo)} temas).")
+                st.write(f"  ✓ {len(todas_questoes_eixo)} questões gravadas ({len(blocos_eixo)} temas).")
 
             em.consolidar(wb, numero_simulacao, eixos_questoes)
             ds.salvar_workbook(folder_id, wb)
@@ -266,7 +287,6 @@ def pagina_desempenho():
 
     wb = ds.baixar_workbook(folder_id)
     resultados = rm.carregar_todos_resultados(wb)
-
     if not resultados:
         st.info("Ainda não há respostas registradas para este estudo.")
         return
