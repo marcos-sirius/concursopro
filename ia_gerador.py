@@ -29,6 +29,14 @@ MODEL = "gpt-5.6-terra"
 MAX_TENTATIVAS = 5 # Aumentado para suportar o loop de substituição
 MAX_SUBSTITUTAS = 2
 
+# Marcador literal que a IA deve escrever no comentário no lugar da letra da
+# alternativa correta. Como a ordem das alternativas só é decidida DEPOIS
+# (em balancear_gabaritos), pedir a letra de verdade deixaria o comentário
+# desatualizado assim que a questão fosse embaralhada. Em vez disso, a IA
+# escreve esse marcador fixo, e o Python faz um simples replace() pela letra
+# final — sem gastar nenhuma chamada extra de API.
+MARCADOR_CORRETA = "[[LETRA_CORRETA]]"
+
 api_key = os.environ.get("OPENAI_API_KEY")
 
 if not api_key:
@@ -171,7 +179,14 @@ REGRAS OBRIGATÓRIAS:
 4. Em questões de lógica ou matemática, resolva o problema antes de escolher a resposta.
 5. O campo "correta" deve apontar para a alternativa certa: 0=A, 1=B, 2=C, 3=D, 4=E.
 6. O campo "letra_gabarito" DEVE ser a letra correspondente ao índice (A, B, C, D ou E).
-7. O comentário deve explicar a solução baseando-se na mesma letra_gabarito.
+7. Sempre que o comentário precisar se referir à alternativa correta PELA LETRA,
+   use OBRIGATORIAMENTE o texto literal {MARCADOR_CORRETA} no lugar da letra —
+   NUNCA escreva a letra de verdade (ex: NÃO escreva "a alternativa C está
+   correta"; escreva "a alternativa {MARCADOR_CORRETA} está correta"). Isso é
+   obrigatório porque a ordem das alternativas é reorganizada DEPOIS de gerada
+   a questão, e o Python substitui esse marcador pela letra final automaticamente.
+   Fora isso, pode explicar o raciocínio normalmente, inclusive citando o
+   conteúdo de outras alternativas (sem citar a letra delas).
 8. NÃO escreva a letra da alternativa dentro do texto da opção. Gere apenas o conteúdo da alternativa.
 
 {bloco_evitar}
@@ -202,9 +217,14 @@ Verifique obrigatoriamente:
 3. Se a alternativa indicada em "correta" e "letra_gabarito" está correta.
 4. Refaça cálculos e validações lógicas do zero.
 5. O comentário contradiz o gabarito?
+6. O comentário cita uma LETRA de verdade (A, B, C, D ou E) em vez do marcador
+   "{MARCADOR_CORRETA}"? Se sim, isso é um ERRO — substitua a letra pelo
+   marcador literal "{MARCADOR_CORRETA}" no texto do comentário. NUNCA remova
+   o marcador nem o troque por uma letra — ele é resolvido pelo Python depois,
+   após a ordem final das alternativas ser decidida.
 
-- "aprovada": Questão impecável e gabarito 100% correto.
-- "corrigir_gabarito": A questão é boa, mas o gerador errou o índice/letra ou o comentário. Corrija-os.
+- "aprovada": Questão impecável, gabarito 100% correto e comentário usando o marcador (não uma letra) para se referir à resposta certa.
+- "corrigir_gabarito": A questão é boa, mas o gerador errou o índice/letra ou o comentário (incluindo citação de letra no texto). Corrija-os.
 - "rejeitar": Questão ambígua, cálculo errado, múltiplas corretas ou sem resposta.
 
 Lembre-se: Você deve preencher "correta" (0 a 4) e "letra_gabarito" (A a E) sempre de forma coerente entre si.
@@ -380,6 +400,17 @@ def gerar_bloco(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None
 
     return todas_questoes
 
+def _comentario_cita_letra(comentario: str) -> bool:
+    """
+    Detecta se o texto do comentário ainda menciona uma letra de alternativa
+    (ex: "alternativa C", "opção B") — sinal de que a IA não seguiu a regra
+    de não citar letras, e que o texto vai ficar desatualizado após o
+    embaralhamento de posições feito por balancear_gabaritos().
+    """
+    padrao = re.compile(r'\b(alternativa|op[cç][aã]o|item|letra)\s+[A-E]\b', re.IGNORECASE)
+    return bool(padrao.search(comentario or ""))
+
+
 def _embaralhar_questao(q: dict, posicao_alvo: int):
     """Reposiciona a alternativa correta mantendo o contrato original[cite: 1]."""
     opcoes = list(q["opcoes"])
@@ -390,7 +421,27 @@ def _embaralhar_questao(q: dict, posicao_alvo: int):
     q["correta"] = posicao_alvo
     # Atualiza a letra referencial pós-embaralhamento
     mapa = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
-    q["letra_gabarito"] = mapa[posicao_alvo]
+    letra_final = mapa[posicao_alvo]
+    q["letra_gabarito"] = letra_final
+
+    # Resolve o marcador {MARCADOR_CORRETA} pela letra FINAL, já com a
+    # posição definitiva — é aqui que a mágica acontece, em Python puro,
+    # sem gastar nenhuma chamada extra de API.
+    comentario = q.get("comentario", "") or ""
+    if MARCADOR_CORRETA in comentario:
+        q["comentario"] = comentario.replace(MARCADOR_CORRETA, letra_final)
+    elif _comentario_cita_letra(comentario):
+        # Rede de segurança: a IA escapou da regra e escreveu uma letra de
+        # verdade em vez do marcador. Não corrigimos automaticamente (arriscado
+        # — o comentário pode citar várias letras, inclusive de distratores),
+        # só avisamos nos logs pra você saber que essa questão específica
+        # precisa de revisão manual.
+        pergunta_resumida = (q.get("pergunta", "") or "")[:60]
+        print(
+            f"  ⚠️ [ATENÇÃO] Comentário citou uma letra literal em vez do "
+            f"marcador {MARCADOR_CORRETA} — pode estar desatualizado após o "
+            f"embaralhamento. Pergunta: \"{pergunta_resumida}...\""
+        )
 
 def balancear_gabaritos(questoes: list) -> list:
     """Distribui uniformemente as respostas entre A-E[cite: 1]."""
