@@ -1,4 +1,3 @@
-```python
 """
 Geração de questões via API da OpenAI.
 
@@ -6,14 +5,6 @@ Mantém o mesmo contrato usado pelo restante da aplicação:
 - gerar_questoes(...)
 - gerar_bloco(...)
 - balancear_gabaritos(...)
-
-Cada questão possui:
-{
-    "pergunta": "...",
-    "opcoes": ["A", "B", "C", "D", "E"],
-    "correta": 0,
-    "comentario": "..."
-}
 """
 
 import json
@@ -23,11 +14,6 @@ import os
 
 from openai import OpenAI, RateLimitError
 from dotenv import load_dotenv
-
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
 
 load_dotenv()
 
@@ -46,29 +32,12 @@ if not api_key:
 client = OpenAI(api_key=api_key)
 
 
-# ============================================================
-# PROMPT
-# ============================================================
-
-def montar_prompt(
-    banca: str,
-    nivel: str,
-    tema: str,
-    qtd: int,
-    evitar: list = None
-) -> str:
-
+def montar_prompt(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> str:
     bloco_evitar = ""
 
     if evitar:
-        # Limita o histórico enviado para evitar prompts gigantes.
-        # Mantém as questões mais recentes.
         evitar_recentes = evitar[-100:]
-
-        lista = "\n".join(
-            f"- {p}" for p in evitar_recentes
-        )
-
+        lista = "\n".join(f"- {p}" for p in evitar_recentes)
         bloco_evitar = f"""
 NÃO repita, nem crie variações óbvias das perguntas abaixo.
 Não basta trocar nomes, números ou pequenas palavras.
@@ -112,30 +81,12 @@ Retorne exclusivamente os dados estruturados solicitados pela API.
 """
 
 
-# ============================================================
-# CHAMADA À OPENAI
-# ============================================================
-
 def _chamar_api(prompt: str):
-    """
-    Chama o modelo usando a Responses API + Structured Outputs.
-
-    Retorna uma lista de questões.
-    """
-
     response = client.responses.create(
         model=MODEL,
-
-        # Para geração de questões, não precisamos de raciocínio
-        # adicional muito elevado. Isso reduz custo/latência.
-        reasoning={
-            "effort": "none"
-        },
-
+        reasoning={"effort": "none"},
         input=prompt,
-
         max_output_tokens=8000,
-
         text={
             "format": {
                 "type": "json_schema",
@@ -151,53 +102,39 @@ def _chamar_api(prompt: str):
                                 "type": "object",
                                 "additionalProperties": False,
                                 "properties": {
-                                    "pergunta": {
-                                        "type": "string"
-                                    },
+                                    "pergunta": {"type": "string"},
                                     "opcoes": {
                                         "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
+                                        "items": {"type": "string"},
                                         "minItems": 5,
-                                        "maxItems": 5
+                                        "maxItems": 5,
                                     },
                                     "correta": {
                                         "type": "integer",
                                         "minimum": 0,
-                                        "maximum": 4
+                                        "maximum": 4,
                                     },
-                                    "comentario": {
-                                        "type": "string"
-                                    }
+                                    "comentario": {"type": "string"},
                                 },
                                 "required": [
                                     "pergunta",
                                     "opcoes",
                                     "correta",
-                                    "comentario"
-                                ]
-                            }
+                                    "comentario",
+                                ],
+                            },
                         }
                     },
-                    "required": [
-                        "questoes"
-                    ]
-                }
+                    "required": ["questoes"],
+                },
             }
-        }
+        },
     )
-
-    # --------------------------------------------------------
-    # Verificação de resposta
-    # --------------------------------------------------------
 
     texto = response.output_text
 
     if not texto:
-        raise ValueError(
-            "A OpenAI retornou uma resposta vazia."
-        )
+        raise ValueError("A OpenAI retornou uma resposta vazia.")
 
     try:
         dados = json.loads(texto)
@@ -210,22 +147,13 @@ def _chamar_api(prompt: str):
     questoes = dados.get("questoes")
 
     if not isinstance(questoes, list):
-        raise ValueError(
-            "A resposta não contém uma lista válida em 'questoes'."
-        )
-
-    # --------------------------------------------------------
-    # Validação das questões
-    # --------------------------------------------------------
+        raise ValueError("A resposta não contém uma lista válida em 'questoes'.")
 
     questoes_validas = []
 
     for i, q in enumerate(questoes, start=1):
-
         if not isinstance(q, dict):
-            raise ValueError(
-                f"Questão {i} não é um objeto JSON válido."
-            )
+            raise ValueError(f"Questão {i} não é um objeto JSON válido.")
 
         pergunta = q.get("pergunta")
         opcoes = q.get("opcoes")
@@ -233,9 +161,7 @@ def _chamar_api(prompt: str):
         comentario = q.get("comentario")
 
         if not isinstance(pergunta, str) or not pergunta.strip():
-            raise ValueError(
-                f"Questão {i}: campo 'pergunta' inválido."
-            )
+            raise ValueError(f"Questão {i}: campo 'pergunta' inválido.")
 
         if not isinstance(opcoes, list) or len(opcoes) != 5:
             raise ValueError(
@@ -243,145 +169,80 @@ def _chamar_api(prompt: str):
                 f"recebidas {len(opcoes) if isinstance(opcoes, list) else 'valor inválido'}."
             )
 
-        if not all(
-            isinstance(opcao, str) and opcao.strip()
-            for opcao in opcoes
-        ):
-            raise ValueError(
-                f"Questão {i}: existe alternativa vazia ou inválida."
-            )
+        if not all(isinstance(opcao, str) and opcao.strip() for opcao in opcoes):
+            raise ValueError(f"Questão {i}: existe alternativa vazia ou inválida.")
 
         if not isinstance(correta, int) or not 0 <= correta <= 4:
-            raise ValueError(
-                f"Questão {i}: índice 'correta' inválido: {correta}"
-            )
+            raise ValueError(f"Questão {i}: índice 'correta' inválido: {correta}")
 
         if not isinstance(comentario, str):
             comentario = ""
 
-        questoes_validas.append({
-            "pergunta": pergunta.strip(),
-            "opcoes": [op.strip() for op in opcoes],
-            "correta": correta,
-            "comentario": comentario.strip()
-        })
+        questoes_validas.append(
+            {
+                "pergunta": pergunta.strip(),
+                "opcoes": [op.strip() for op in opcoes],
+                "correta": correta,
+                "comentario": comentario.strip(),
+            }
+        )
 
     if not questoes_validas:
-        raise ValueError(
-            "A OpenAI respondeu corretamente, mas não gerou nenhuma questão."
-        )
+        raise ValueError("A OpenAI respondeu corretamente, mas não gerou nenhuma questão.")
 
     return questoes_validas
 
-
-# ============================================================
-# GERAÇÃO COM RETRY
-# ============================================================
 
 def gerar_questoes(
     banca: str,
     nivel: str,
     tema: str,
     qtd: int,
-    evitar: list = None
+    evitar: list = None,
 ) -> list:
-
-    prompt = montar_prompt(
-        banca=banca,
-        nivel=nivel,
-        tema=tema,
-        qtd=qtd,
-        evitar=evitar
-    )
-
+    prompt = montar_prompt(banca, nivel, tema, qtd, evitar)
     ultimo_erro = None
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
-
         try:
-            print(
-                f"[{tema}] "
-                f"Tentativa {tentativa}/{MAX_TENTATIVAS}..."
-            )
-
+            print(f"[{tema}] Tentativa {tentativa}/{MAX_TENTATIVAS}...")
             questoes = _chamar_api(prompt)
 
-            # Não aceita quantidade errada silenciosamente.
             if len(questoes) != qtd:
                 raise ValueError(
                     f"A IA retornou {len(questoes)} questão(ões), "
                     f"mas eram esperadas {qtd}."
                 )
 
-            print(
-                f"[{tema}] ✓ "
-                f"{len(questoes)} questões geradas."
-            )
-
+            print(f"[{tema}] ✓ {len(questoes)} questões geradas.")
             return questoes
 
         except RateLimitError as e:
-
             ultimo_erro = e
-
             espera = 10 * tentativa
-
-            print(
-                f"[{tema}] ⚠️ Rate limit na tentativa "
-                f"{tentativa}/{MAX_TENTATIVAS}."
-            )
-
-            print(
-                f"[{tema}] Aguardando {espera}s..."
-            )
-
+            print(f"[{tema}] ⚠️ Rate limit na tentativa {tentativa}/{MAX_TENTATIVAS}.")
             if tentativa < MAX_TENTATIVAS:
+                print(f"[{tema}] Aguardando {espera}s...")
                 time.sleep(espera)
 
         except Exception as e:
-
             ultimo_erro = e
-
-            print(
-                f"[{tema}] ❌ ERRO na tentativa "
-                f"{tentativa}/{MAX_TENTATIVAS}"
-            )
-
-            print(
-                f"[{tema}] Tipo: {type(e).__name__}"
-            )
-
-            print(
-                f"[{tema}] Mensagem: {e}"
-            )
+            print(f"[{tema}] ❌ ERRO na tentativa {tentativa}/{MAX_TENTATIVAS}")
+            print(f"[{tema}] Tipo: {type(e).__name__}")
+            print(f"[{tema}] Mensagem: {e}")
 
             if tentativa < MAX_TENTATIVAS:
-
                 espera = 5 * tentativa
-
-                print(
-                    f"[{tema}] Nova tentativa em {espera}s..."
-                )
-
+                print(f"[{tema}] Nova tentativa em {espera}s...")
                 time.sleep(espera)
 
-    print(
-        f"[{tema}] ❌ FALHOU após "
-        f"{MAX_TENTATIVAS} tentativas."
-    )
+    print(f"[{tema}] ❌ FALHOU após {MAX_TENTATIVAS} tentativas.")
 
     if ultimo_erro:
-        print(
-            f"[{tema}] Último erro: "
-            f"{type(ultimo_erro).__name__}: {ultimo_erro}"
-        )
+        print(f"[{tema}] Último erro: {type(ultimo_erro).__name__}: {ultimo_erro}")
 
     return []
 
-
-# ============================================================
-# GERAÇÃO EM BLOCOS
-# ============================================================
 
 def gerar_bloco(
     banca: str,
@@ -389,17 +250,9 @@ def gerar_bloco(
     tema: str,
     qtd: int,
     evitar: list = None,
-    tamanho_bloco: int = 10
+    tamanho_bloco: int = 10,
 ) -> list:
-    """
-    Gera 'qtd' questões em blocos de até 'tamanho_bloco'.
-
-    Se um bloco falhar, tenta automaticamente dividi-lo em
-    partes menores.
-    """
-
     evitar = list(evitar) if evitar else []
-
     todas_questoes = []
 
     if qtd <= 0:
@@ -408,28 +261,17 @@ def gerar_bloco(
     if tamanho_bloco <= 0:
         tamanho_bloco = 10
 
-    blocos = [
-        tamanho_bloco
-    ] * (qtd // tamanho_bloco)
-
+    blocos = [tamanho_bloco] * (qtd // tamanho_bloco)
     resto = qtd % tamanho_bloco
 
     if resto:
         blocos.append(resto)
 
     for i, qtd_bloco in enumerate(blocos, 1):
-
-        if len(blocos) == 1:
-            sufixo_tema = tema
-        else:
-            sufixo_tema = (
-                f"{tema} "
-                f"(Bloco {i}/{len(blocos)})"
-            )
+        sufixo_tema = tema if len(blocos) == 1 else f"{tema} (Bloco {i}/{len(blocos)})"
 
         print(
-            f"\n[{tema}] "
-            f"Gerando bloco {i}/{len(blocos)} "
+            f"\n[{tema}] Gerando bloco {i}/{len(blocos)} "
             f"com {qtd_bloco} questão(ões)..."
         )
 
@@ -438,23 +280,12 @@ def gerar_bloco(
             nivel=nivel,
             tema=sufixo_tema,
             qtd=qtd_bloco,
-            evitar=evitar
+            evitar=evitar,
         )
 
-        # ----------------------------------------------------
-        # FALLBACK
-        # ----------------------------------------------------
-
         if not questoes and qtd_bloco > 1:
-
-            print(
-                f"[{tema}] ⚠️ "
-                f"Bloco {i} falhou."
-            )
-
-            print(
-                f"[{tema}] Tentando dividir em duas partes..."
-            )
+            print(f"[{tema}] ⚠️ Bloco {i} falhou.")
+            print(f"[{tema}] Tentando dividir em duas partes...")
 
             metade = qtd_bloco // 2
 
@@ -463,130 +294,57 @@ def gerar_bloco(
                 nivel=nivel,
                 tema=f"{sufixo_tema} (Parte 1)",
                 qtd=metade,
-                evitar=evitar
+                evitar=evitar,
             )
 
-            evitar_parte_2 = (
-                evitar
-                + [
-                    q.get("pergunta", "")
-                    for q in p1
-                    if q.get("pergunta")
-                ]
-            )
+            evitar_parte_2 = evitar + [
+                q.get("pergunta", "") for q in p1 if q.get("pergunta")
+            ]
 
             p2 = gerar_questoes(
                 banca=banca,
                 nivel=nivel,
                 tema=f"{sufixo_tema} (Parte 2)",
                 qtd=qtd_bloco - metade,
-                evitar=evitar_parte_2
+                evitar=evitar_parte_2,
             )
 
             questoes = p1 + p2
 
         todas_questoes.extend(questoes)
 
-        # ----------------------------------------------------
-        # ATUALIZA HISTÓRICO
-        # ----------------------------------------------------
-
         evitar.extend(
-            q.get("pergunta", "")
-            for q in questoes
-            if q.get("pergunta")
+            q.get("pergunta", "") for q in questoes if q.get("pergunta")
         )
-
-    # --------------------------------------------------------
-    # RESULTADO FINAL
-    # --------------------------------------------------------
 
     if len(todas_questoes) < qtd:
-
-        print(
-            f"[{tema}] ⚠️ "
-            f"Geradas {len(todas_questoes)}/{qtd} "
-            f"questões."
-        )
-
+        print(f"[{tema}] ⚠️ Geradas {len(todas_questoes)}/{qtd} questões.")
     else:
-
-        print(
-            f"[{tema}] ✓ "
-            f"{len(todas_questoes)}/{qtd} questões concluídas."
-        )
+        print(f"[{tema}] ✓ {len(todas_questoes)}/{qtd} questões concluídas.")
 
     return todas_questoes
 
 
-# ============================================================
-# EMBARALHAMENTO DAS ALTERNATIVAS
-# ============================================================
-
-def _embaralhar_questao(
-    q: dict,
-    posicao_alvo: int
-):
-    """
-    Reposiciona a alternativa correta para 'posicao_alvo'.
-
-    0 = A
-    1 = B
-    2 = C
-    3 = D
-    4 = E
-    """
-
+def _embaralhar_questao(q: dict, posicao_alvo: int):
     opcoes = list(q["opcoes"])
-
     correta = q["correta"]
-
     texto_correta = opcoes.pop(correta)
-
     random.shuffle(opcoes)
-
-    opcoes.insert(
-        posicao_alvo,
-        texto_correta
-    )
-
+    opcoes.insert(posicao_alvo, texto_correta)
     q["opcoes"] = opcoes
     q["correta"] = posicao_alvo
 
 
-# ============================================================
-# BALANCEAMENTO DO GABARITO
-# ============================================================
-
-def balancear_gabaritos(
-    questoes: list
-) -> list:
-    """
-    Distribui as respostas corretas entre A-E.
-
-    O balanceamento é feito no código, e não depende da IA.
-    """
-
+def balancear_gabaritos(questoes: list) -> list:
     n = len(questoes)
 
     if n == 0:
         return questoes
 
-    posicoes = [
-        i % 5
-        for i in range(n)
-    ]
-
+    posicoes = [i % 5 for i in range(n)]
     random.shuffle(posicoes)
 
-    for q, pos in zip(
-        questoes,
-        posicoes
-    ):
-        _embaralhar_questao(
-            q,
-            pos
-        )
+    for q, pos in zip(questoes, posicoes):
+        _embaralhar_questao(q, pos)
 
     return questoes
-```
