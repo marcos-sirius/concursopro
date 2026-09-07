@@ -1,7 +1,7 @@
 """
-Equivalente a config_manager.py, mas para o fluxo web (Streamlit + Drive):
-reaproveita a parte PURA da lógica (slugify, transformação de dict) e troca
-só a persistência (disco -> Drive).
+Equivalente a config_manager.py, mas para o fluxo web: reaproveita a parte
+PURA da lógica (slugify, transformação de dict) e persiste no Drive via
+Service Account (drive_storage.py).
 """
 import config_manager as cm
 import drive_storage as ds
@@ -13,7 +13,6 @@ def listar_estudos() -> list:
 
 
 def criar_estudo(nome_estudo: str, banca: str, nivel: str, eixos: dict) -> tuple:
-    """Cria a subpasta do estudo no Drive + o config.json inicial dentro dela."""
     slug = cm.slugify(nome_estudo)
     folder_id = ds.obter_ou_criar_pasta_estudo(slug)
 

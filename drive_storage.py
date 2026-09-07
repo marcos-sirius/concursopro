@@ -1,35 +1,27 @@
 """
-Camada de armazenamento no Google Drive, equivalente ao que config_manager.py
-e excel_manager.py faziam com Path/disco local — mas aqui cada estudo vira uma
-SUBPASTA dentro de uma pasta raiz no Drive (ROOT_FOLDER_ID, em st.secrets),
-contendo:
-  - config.json    (mesmo conteúdo de sempre)
-  - simulado.xlsx  (mesmo arquivo de sempre)
+Camada de armazenamento no Google Drive — equivalente ao que config_manager.py
+e excel_manager.py faziam com Path/disco local, agora usando a Service Account
+(drive_service.py) em vez de OAuth pessoal.
 
-Usa chamadas REST diretas à API do Drive v3 (sem biblioteca google-api-python-
-client, pra manter a dependência mínima), autenticando com o access_token do
-usuário logado (google_drive_auth.py).
+Estrutura no Drive (dentro da pasta raiz, em st.secrets["google_drive"]["root_folder_id"]):
+  <pasta raiz>/
+    <slug_do_estudo_1>/
+        config.json
+        simulado.xlsx      (guias por eixo + Consolidado + Resultados)
+    <slug_do_estudo_2>/
+        ...
 """
 import io
 import json
 
-import requests
 import streamlit as st
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from openpyxl import Workbook, load_workbook
 
-import google_drive_auth as auth
+import drive_service as dsvc
 
-API_FILES = "https://www.googleapis.com/drive/v3/files"
-API_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 MIME_FOLDER = "application/vnd.google-apps.folder"
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-
-def _headers() -> dict:
-    token = auth.obter_access_token()
-    if not token:
-        raise RuntimeError("Usuário não autenticado no Google.")
-    return {"Authorization": f"Bearer {token}"}
 
 
 def root_folder_id() -> str:
@@ -37,26 +29,24 @@ def root_folder_id() -> str:
 
 
 def _buscar(nome: str, parent_id: str, mime: str | None = None) -> dict | None:
+    service = dsvc.obter_service()
     nome_escapado = nome.replace("'", r"\'")
     q = f"name = '{nome_escapado}' and '{parent_id}' in parents and trashed = false"
     if mime:
         q += f" and mimeType = '{mime}'"
-    resp = requests.get(API_FILES, headers=_headers(), params={
-        "q": q, "fields": "files(id, name, mimeType)",
-    })
-    resp.raise_for_status()
-    arquivos = resp.json().get("files", [])
+    resp = service.files().list(q=q, fields="files(id, name, mimeType)").execute()
+    arquivos = resp.get("files", [])
     return arquivos[0] if arquivos else None
 
 
 def listar_estudos() -> list:
     """Lista as subpastas (cada uma = um estudo) dentro da pasta raiz."""
-    resp = requests.get(API_FILES, headers=_headers(), params={
-        "q": f"'{root_folder_id()}' in parents and mimeType = '{MIME_FOLDER}' and trashed = false",
-        "fields": "files(id, name)",
-    })
-    resp.raise_for_status()
-    return sorted(resp.json().get("files", []), key=lambda f: f["name"])
+    service = dsvc.obter_service()
+    resp = service.files().list(
+        q=f"'{root_folder_id()}' in parents and mimeType = '{MIME_FOLDER}' and trashed = false",
+        fields="files(id, name)",
+    ).execute()
+    return sorted(resp.get("files", []), key=lambda f: f["name"])
 
 
 def obter_ou_criar_pasta_estudo(slug: str) -> str:
@@ -64,47 +54,32 @@ def obter_ou_criar_pasta_estudo(slug: str) -> str:
     if existente:
         return existente["id"]
 
-    resp = requests.post(API_FILES, headers=_headers(), json={
-        "name": slug,
-        "mimeType": MIME_FOLDER,
-        "parents": [root_folder_id()],
-    })
-    resp.raise_for_status()
-    return resp.json()["id"]
+    service = dsvc.obter_service()
+    metadata = {"name": slug, "mimeType": MIME_FOLDER, "parents": [root_folder_id()]}
+    criado = service.files().create(body=metadata, fields="id").execute()
+    return criado["id"]
 
 
 def _baixar_bytes(file_id: str) -> bytes:
-    resp = requests.get(f"{API_FILES}/{file_id}", headers=_headers(), params={"alt": "media"})
-    resp.raise_for_status()
-    return resp.content
+    service = dsvc.obter_service()
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, service.files().get_media(fileId=file_id))
+    concluido = False
+    while not concluido:
+        _, concluido = downloader.next_chunk()
+    return buffer.getvalue()
 
 
 def _upload_bytes(nome: str, dados: bytes, parent_id: str, mime_type: str,
                    file_id: str | None = None) -> dict:
-    metadata = {"name": nome}
-    if not file_id:
-        metadata["parents"] = [parent_id]
-
-    boundary = "eara_boundary_simulador"
-    corpo = (
-        f"--{boundary}\r\n"
-        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-        f"{json.dumps(metadata)}\r\n"
-        f"--{boundary}\r\n"
-        f"Content-Type: {mime_type}\r\n\r\n"
-    ).encode("utf-8") + dados + f"\r\n--{boundary}--".encode("utf-8")
-
-    headers = _headers()
-    headers["Content-Type"] = f"multipart/related; boundary={boundary}"
+    service = dsvc.obter_service()
+    media = MediaIoBaseUpload(io.BytesIO(dados), mimetype=mime_type, resumable=False)
 
     if file_id:
-        resp = requests.patch(f"{API_UPLOAD}/{file_id}?uploadType=multipart",
-                               headers=headers, data=corpo)
-    else:
-        resp = requests.post(f"{API_UPLOAD}?uploadType=multipart",
-                              headers=headers, data=corpo)
-    resp.raise_for_status()
-    return resp.json()
+        return service.files().update(fileId=file_id, media_body=media).execute()
+
+    metadata = {"name": nome, "parents": [parent_id]}
+    return service.files().create(body=metadata, media_body=media, fields="id").execute()
 
 
 # ---------------- config.json ----------------
@@ -130,7 +105,7 @@ def baixar_workbook(pasta_estudo_id: str) -> Workbook:
     arquivo = _buscar("simulado.xlsx", pasta_estudo_id)
     if not arquivo:
         wb = Workbook()
-        wb.remove(wb.active)  # equivalente ao início de excel_manager.abrir_ou_criar
+        wb.remove(wb.active)
         return wb
     dados = _baixar_bytes(arquivo["id"])
     return load_workbook(io.BytesIO(dados))

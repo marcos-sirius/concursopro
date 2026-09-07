@@ -3,4 +3,6 @@ openpyxl>=3.1
 openai>=1.50
 python-docx>=1.1
 python-dotenv>=1.0
-requests>=2.31
+google-api-python-client>=2.140
+google-auth>=2.34
+pandas>=2.2
