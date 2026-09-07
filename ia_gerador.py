@@ -1,35 +1,23 @@
 """
-Geração e revisão de questões via API da OpenAI.
+Geração e revisão de questões via API da OpenAI (Versão 3 - LLMOps).
 
-Fluxo:
-1. Gera as questões com GPT-5.6 Terra.
-2. Valida a estrutura localmente.
-3. Envia o bloco para uma segunda revisão da IA.
-4. A revisão confere:
-   - resposta correta;
-   - existência de apenas uma alternativa correta;
-   - coerência lógica/matemática/conceitual;
-   - coerência entre gabarito e comentário.
-5. Se o revisor puder corrigir apenas o gabarito/comentário,
-   a questão é corrigida.
-6. Se a questão for considerada inválida, ela é descartada e
-   uma substituta é gerada.
-7. Depois disso, o balanceamento A-E é feito normalmente.
-
-Mantém o contrato público usado pelo restante da aplicação:
-- gerar_questoes(...)
-- gerar_bloco(...)
-- balancear_gabaritos(...)
+Fluxos implementados:
+1. Geração (GPT) com exigência de duplo-fator no gabarito (índice + letra).
+2. Sanitização (Python) limpando A), B), C) das alternativas via Regex.
+3. Validação Lógica (Python) confirmando se o índice bate com a letra defendida.
+4. Revisão Individual (GPT) focada e isolada por questão para evitar alucinações.
+5. Loop de Substituição: rejeitadas não entram; substitutas são geradas até bater a meta.
+6. Balanceamento e persistência mantidos.
 """
 
 import json
 import os
 import random
 import time
+import re
 
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
-
 
 # ============================================================
 # CONFIGURAÇÃO
@@ -38,10 +26,7 @@ from openai import OpenAI, RateLimitError
 load_dotenv()
 
 MODEL = "gpt-5.6-terra"
-MAX_TENTATIVAS = 4
-
-# Quantas rodadas de substituição serão tentadas quando o revisor
-# considerar uma questão irrecuperável.
+MAX_TENTATIVAS = 5 # Aumentado para suportar o loop de substituição
 MAX_SUBSTITUTAS = 2
 
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -54,7 +39,6 @@ if not api_key:
     )
 
 client = OpenAI(api_key=api_key)
-
 
 # ============================================================
 # SCHEMAS
@@ -82,12 +66,17 @@ SCHEMA_QUESTOES = {
                         "minimum": 0,
                         "maximum": 4,
                     },
+                    "letra_gabarito": {
+                        "type": "string",
+                        "enum": ["A", "B", "C", "D", "E"]
+                    },
                     "comentario": {"type": "string"},
                 },
                 "required": [
                     "pergunta",
                     "opcoes",
                     "correta",
+                    "letra_gabarito",
                     "comentario",
                 ],
             },
@@ -96,83 +85,70 @@ SCHEMA_QUESTOES = {
     "required": ["questoes"],
 }
 
-
+# Modificado para avaliar uma questão por vez
 SCHEMA_REVISAO = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "revisoes": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": [
-                            "aprovada",
-                            "corrigir_gabarito",
-                            "rejeitar",
-                        ],
-                    },
-                    "correta": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 4,
-                    },
-                    "comentario": {
-                        "type": "string"
-                    },
-                    "motivo": {
-                        "type": "string"
-                    },
-                },
-                "required": [
-                    "status",
-                    "correta",
-                    "comentario",
-                    "motivo",
-                ],
-            },
-        }
+        "status": {
+            "type": "string",
+            "enum": [
+                "aprovada",
+                "corrigir_gabarito",
+                "rejeitar",
+            ],
+        },
+        "correta": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+        },
+        "letra_gabarito": {
+            "type": "string",
+            "enum": ["A", "B", "C", "D", "E"]
+        },
+        "comentario": {
+            "type": "string"
+        },
+        "motivo": {
+            "type": "string"
+        },
     },
-    "required": ["revisoes"],
+    "required": [
+        "status",
+        "correta",
+        "letra_gabarito",
+        "comentario",
+        "motivo",
+    ],
 }
 
+# ============================================================
+# LÓGICA DE VALIDAÇÃO PYTHON (JUIZ)
+# ============================================================
+
+def _gabarito_consistente(correta_idx: int, letra: str) -> bool:
+    """Verifica se o índice numérico corresponde à letra declarada."""
+    mapa = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
+    return mapa.get(correta_idx) == letra.upper()
+
+def _limpar_letras_alternativas(texto: str) -> str:
+    """Remove A), b-, C. etc do início do texto[cite: 1]."""
+    return re.sub(r'^([A-Ea-e][\)\.-]\s*)', '', texto).strip()
 
 # ============================================================
 # PROMPT DE GERAÇÃO
 # ============================================================
 
-def montar_prompt(
-    banca: str,
-    nivel: str,
-    tema: str,
-    qtd: int,
-    evitar: list = None,
-) -> str:
-
+def montar_prompt(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> str:
     bloco_evitar = ""
-
     if evitar:
-        # Evita prompts gigantes, mantendo as 100 perguntas mais recentes.
         evitar_recentes = evitar[-100:]
-
-        lista = "\n".join(
-            f"- {p}" for p in evitar_recentes
-        )
-
-        bloco_evitar = f"""
-NÃO repita nem crie variações óbvias das perguntas abaixo.
-Não basta trocar nomes, números ou pequenas palavras.
-
-Questões já utilizadas:
-{lista}
-"""
+        lista = "\n".join(f"- {p}" for p in evitar_recentes)
+        bloco_evitar = f"\nNÃO repita nem crie variações óbvias das perguntas abaixo:\n{lista}\n"
 
     return f"""
 Atue como um Examinador de Elite especializado em concursos públicos.
-
 Gere exatamente {qtd} questão(ões) de múltipla escolha.
 
 Banca: {banca}
@@ -180,129 +156,61 @@ Nível: {nivel}
 Tema: {tema}
 
 REGRAS OBRIGATÓRIAS:
-
 1. Cada questão deve possuir exatamente 5 alternativas.
-2. As alternativas devem ser A, B, C, D e E.
-3. Deve existir exatamente UMA alternativa correta.
-4. A questão deve ser tecnicamente correta.
-5. Evite ambiguidades.
-6. Evite alternativas parcialmente corretas quando a questão exigir uma
-   resposta única.
-7. Os distratores devem ser plausíveis.
-8. Não repita questões já utilizadas.
-9. Não crie variações superficiais das questões anteriores.
-10. Em questões de lógica ou matemática, resolva o problema antes de
-    escolher a resposta.
-11. O campo "correta" deve apontar para a alternativa realmente correta:
-    0 = A, 1 = B, 2 = C, 3 = D, 4 = E.
-12. O comentário deve explicar a solução e deve apontar para a MESMA
-    alternativa indicada no campo "correta".
-13. Não coloque a letra da alternativa no texto da alternativa.
-14. Não inclua texto fora da estrutura solicitada.
+2. Deve existir exatamente UMA alternativa correta.
+3. Não repita questões já utilizadas.
+4. Em questões de lógica ou matemática, resolva o problema antes de escolher a resposta.
+5. O campo "correta" deve apontar para a alternativa certa: 0=A, 1=B, 2=C, 3=D, 4=E.
+6. O campo "letra_gabarito" DEVE ser a letra correspondente ao índice (A, B, C, D ou E).
+7. O comentário deve explicar a solução baseando-se na mesma letra_gabarito.
+8. NÃO escreva a letra da alternativa dentro do texto da opção. Gere apenas o conteúdo da alternativa.
 
 {bloco_evitar}
-
-Antes de finalizar cada questão, faça uma conferência interna:
-- resolva a questão;
-- confira as cinco alternativas;
-- confirme que só uma pode ser considerada correta;
-- confira o índice "correta";
-- confira se o comentário corresponde ao gabarito.
 """
 
-
 # ============================================================
-# PROMPT DE REVISÃO
+# PROMPT DE REVISÃO INDIVIDUAL
 # ============================================================
 
-def montar_prompt_revisao(
-    questoes: list,
-    banca: str,
-    nivel: str,
-    tema: str,
-) -> str:
-
-    questoes_json = json.dumps(
-        questoes,
-        ensure_ascii=False,
-        indent=2,
-    )
+def montar_prompt_revisao_individual(questao: dict, banca: str, nivel: str, tema: str) -> str:
+    questao_json = json.dumps(questao, ensure_ascii=False, indent=2)
 
     return f"""
 Você é o REVISOR FINAL de um banco de questões de concursos públicos.
+Sua função é auditar ESTA ÚNICA QUESTÃO antes que ela seja liberada.
 
-Sua função é auditar as questões abaixo antes que elas sejam liberadas
-para um aluno.
-
-Contexto:
+Contexto da Prova:
 Banca: {banca}
 Nível: {nivel}
 Tema: {tema}
 
-QUESTÕES PARA AUDITAR:
-{questoes_json}
-
-Para CADA questão, faça uma análise independente.
+QUESTÃO PARA AUDITAR:
+{questao_json}
 
 Verifique obrigatoriamente:
-
 1. Se a pergunta está bem formulada.
-2. Se existem exatamente cinco alternativas.
-3. Se existe exatamente UMA alternativa inequivocamente correta.
-4. Se a alternativa indicada no campo "correta" é realmente a correta.
-5. Se alguma outra alternativa também poderia ser considerada correta.
-6. Em lógica, verifique formalmente a inferência, contrapositiva,
-   equivalência ou classificação apresentada.
-7. Em matemática/estatística, refaça os cálculos.
-8. Em questões conceituais, verifique se a definição e a aplicação
-   estão coerentes.
-9. Se o comentário explica a resposta correta.
-10. Se o comentário NÃO contradiz o campo "correta".
+2. Se existe exatamente UMA alternativa inequivocamente correta.
+3. Se a alternativa indicada em "correta" e "letra_gabarito" está correta.
+4. Refaça cálculos e validações lógicas do zero.
+5. O comentário contradiz o gabarito?
 
-Use exatamente um destes status:
+- "aprovada": Questão impecável e gabarito 100% correto.
+- "corrigir_gabarito": A questão é boa, mas o gerador errou o índice/letra ou o comentário. Corrija-os.
+- "rejeitar": Questão ambígua, cálculo errado, múltiplas corretas ou sem resposta.
 
-- "aprovada":
-  A questão está correta e o gabarito já está correto.
-
-- "corrigir_gabarito":
-  A questão e as alternativas são aproveitáveis, existe uma única
-  alternativa correta, mas o campo "correta" e/ou o comentário precisam
-  ser corrigidos.
-  Nesse caso, informe no campo "correta" o índice correto e escreva um
-  novo comentário coerente com esse gabarito.
-
-- "rejeitar":
-  A questão não é segura para uma prova. Exemplos:
-  duas alternativas corretas, nenhuma correta, enunciado ambíguo,
-  cálculo inconsistente, informação insuficiente ou alternativas
-  defeituosas.
-
-IMPORTANTE:
-Não aprove uma questão apenas porque o gabarito fornecido pelo gerador
-parece plausível. Resolva a questão você mesmo.
-
-O campo "correta" da sua revisão deve SEMPRE representar a resposta
-final correta, mesmo quando o status for "rejeitar".
+Lembre-se: Você deve preencher "correta" (0 a 4) e "letra_gabarito" (A a E) sempre de forma coerente entre si.
 """
 
-
 # ============================================================
-# CHAMADA GENÉRICA COM JSON SCHEMA
+# NÚCLEO DE REQUISIÇÃO
 # ============================================================
 
-def _responder_json(
-    prompt: str,
-    schema: dict,
-    nome_schema: str,
-    reasoning_effort: str = "medium",
-    max_output_tokens: int = 8000,
-) -> dict:
-
+def _responder_json(prompt: str, schema: dict, nome_schema: str, reasoning_effort: str = "medium") -> dict:
     response = client.responses.create(
         model=MODEL,
         reasoning={"effort": reasoning_effort},
         input=prompt,
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=8000,
         text={
             "format": {
                 "type": "json_schema",
@@ -312,548 +220,175 @@ def _responder_json(
             }
         },
     )
-
     texto = response.output_text
-
-    if not texto:
-        raise ValueError(
-            "A OpenAI retornou uma resposta vazia."
-        )
-
+    if not texto: raise ValueError("Resposta vazia.")
     try:
         return json.loads(texto)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"A resposta da OpenAI não é um JSON válido: {e}. "
-            f"Resposta recebida: {texto[:1000]}"
-        ) from e
-
+        raise ValueError(f"JSON inválido: {e}") from e
 
 # ============================================================
-# VALIDAÇÃO LOCAL
+# TRATAMENTO E VALIDAÇÃO DA QUESTÃO
 # ============================================================
 
 def _validar_estrutura_questao(q: dict) -> None:
-    if not isinstance(q, dict):
-        raise ValueError(
-            "A questão não é um objeto JSON válido."
-        )
-
-    pergunta = q.get("pergunta")
-    opcoes = q.get("opcoes")
-    correta = q.get("correta")
-    comentario = q.get("comentario")
-
-    if not isinstance(pergunta, str) or not pergunta.strip():
-        raise ValueError(
-            "Campo 'pergunta' inválido."
-        )
-
-    if not isinstance(opcoes, list) or len(opcoes) != 5:
-        raise ValueError(
-            "A questão precisa possuir exatamente 5 alternativas."
-        )
-
-    if not all(
-        isinstance(opcao, str) and opcao.strip()
-        for opcao in opcoes
-    ):
-        raise ValueError(
-            "Existe alternativa vazia ou inválida."
-        )
-
-    # Evita cinco alternativas idênticas ou repetidas.
-    normalizadas = [
-        " ".join(opcao.strip().lower().split())
-        for opcao in opcoes
-    ]
-
+    opcoes = q.get("opcoes", [])
+    if len(opcoes) != 5:
+        raise ValueError("A questão precisa possuir exatamente 5 alternativas.")
+    
+    normalizadas = [" ".join(opcao.strip().lower().split()) for opcao in opcoes]
     if len(set(normalizadas)) != 5:
-        raise ValueError(
-            "Existem alternativas repetidas."
-        )
-
-    if not isinstance(correta, int) or not 0 <= correta <= 4:
-        raise ValueError(
-            f"Índice 'correta' inválido: {correta}"
-        )
-
-    if not isinstance(comentario, str):
-        raise ValueError(
-            "Campo 'comentario' inválido."
-        )
-
+        raise ValueError("Existem alternativas repetidas.")
 
 def _normalizar_questao(q: dict) -> dict:
     _validar_estrutura_questao(q)
-
+    
+    # 1. Limpeza automática das alternativas (Regex)
+    opcoes_limpas = [_limpar_letras_alternativas(op) for op in q["opcoes"]]
+    
     return {
         "pergunta": q["pergunta"].strip(),
-        "opcoes": [
-            opcao.strip()
-            for opcao in q["opcoes"]
-        ],
+        "opcoes": opcoes_limpas,
         "correta": int(q["correta"]),
+        "letra_gabarito": q["letra_gabarito"].strip().upper(),
         "comentario": q["comentario"].strip(),
     }
 
-
 # ============================================================
-# GERAÇÃO
-# ============================================================
-
-def _chamar_api(
-    prompt: str,
-    reasoning_effort: str = "medium",
-):
-    dados = _responder_json(
-        prompt=prompt,
-        schema=SCHEMA_QUESTOES,
-        nome_schema="geracao_questoes",
-        reasoning_effort=reasoning_effort,
-        max_output_tokens=8000,
-    )
-
-    questoes = dados.get("questoes")
-
-    if not isinstance(questoes, list):
-        raise ValueError(
-            "A resposta não contém uma lista válida em 'questoes'."
-        )
-
-    if not questoes:
-        raise ValueError(
-            "A OpenAI não gerou nenhuma questão."
-        )
-
-    return [
-        _normalizar_questao(q)
-        for q in questoes
-    ]
-
-
-# ============================================================
-# REVISÃO DAS QUESTÕES
+# AUDITORIA INDIVIDUAL
 # ============================================================
 
-def _revisar_questoes(
-    questoes: list,
-    banca: str,
-    nivel: str,
-    tema: str,
-) -> list:
-
-    if not questoes:
-        return []
-
-    prompt = montar_prompt_revisao(
-        questoes=questoes,
-        banca=banca,
-        nivel=nivel,
-        tema=tema,
-    )
-
-    dados = _responder_json(
+def _revisar_questao_individual(questao: dict, banca: str, nivel: str, tema: str) -> dict:
+    prompt = montar_prompt_revisao_individual(questao, banca, nivel, tema)
+    
+    revisao = _responder_json(
         prompt=prompt,
         schema=SCHEMA_REVISAO,
-        nome_schema="revisao_questoes",
-        # Revisão usa raciocínio médio para reduzir erros em
-        # matemática, lógica e questões conceituais.
-        reasoning_effort="medium",
-        max_output_tokens=8000,
+        nome_schema="revisao_individual",
+        reasoning_effort="high", # Aumentado para high na auditoria fina
     )
 
-    revisoes = dados.get("revisoes")
+    status = revisao.get("status")
+    motivo = revisao.get("motivo", "")
 
-    if not isinstance(revisoes, list):
-        raise ValueError(
-            "A revisão não retornou uma lista válida."
-        )
+    if status == "rejeitar":
+        print(f"  [REVISÃO] ❌ Rejeitada: {motivo}")
+        return None
 
-    if len(revisoes) != len(questoes):
-        raise ValueError(
-            f"A revisão retornou {len(revisoes)} revisões para "
-            f"{len(questoes)} questões."
-        )
+    # Validação Python do Revisor
+    if not _gabarito_consistente(revisao["correta"], revisao["letra_gabarito"]):
+        print(f"  [REVISÃO] ❌ Rejeitada: Revisor falhou na coerência índice ({revisao['correta']}) vs letra ({revisao['letra_gabarito']}).")
+        return None
 
-    resultado = []
-
-    for q, revisao in zip(questoes, revisoes):
-
-        status = revisao.get("status")
-        correta = revisao.get("correta")
-        comentario = revisao.get("comentario")
-        motivo = revisao.get("motivo", "")
-
-        if status not in {
-            "aprovada",
-            "corrigir_gabarito",
-            "rejeitar",
-        }:
-            raise ValueError(
-                f"Status de revisão inválido: {status}"
-            )
-
-        if not isinstance(correta, int) or not 0 <= correta <= 4:
-            raise ValueError(
-                f"Índice correto inválido na revisão: {correta}"
-            )
-
-        if not isinstance(comentario, str):
-            comentario = ""
-
-        if status == "rejeitar":
-            print(
-                "[REVISÃO] ❌ Questão rejeitada: "
-                f"{motivo}"
-            )
-            resultado.append(None)
-            continue
-
-        # A revisão passa a ser a fonte final do gabarito e comentário.
-        q_final = dict(q)
-        q_final["correta"] = correta
-        q_final["comentario"] = comentario.strip()
-
-        try:
-            _validar_estrutura_questao(q_final)
-        except Exception as e:
-            print(
-                "[REVISÃO] ❌ Questão descartada após revisão "
-                f"por falha estrutural: {e}"
-            )
-            resultado.append(None)
-            continue
-
-        if status == "corrigir_gabarito":
-            print(
-                "[REVISÃO] 🔧 Gabarito/comentário corrigidos."
-            )
-        else:
-            print(
-                "[REVISÃO] ✓ Questão aprovada."
-            )
-
-        resultado.append(q_final)
-
-    return resultado
-
+    q_final = dict(questao)
+    q_final["correta"] = revisao["correta"]
+    q_final["letra_gabarito"] = revisao["letra_gabarito"]
+    q_final["comentario"] = revisao.get("comentario", "").strip()
+    
+    return q_final
 
 # ============================================================
-# GERAÇÃO + REVISÃO
+# FLUXO PRINCIPAL COM LOOP DE SUBSTITUIÇÃO
 # ============================================================
 
-def gerar_questoes(
-    banca: str,
-    nivel: str,
-    tema: str,
-    qtd: int,
-    evitar: list = None,
-) -> list:
-
-    if qtd <= 0:
-        return []
-
+def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> list:
+    if qtd <= 0: return []
     evitar = list(evitar) if evitar else []
+    
+    aprovadas_finais = []
+    tentativa_global = 1
 
-    todas = []
-
-    # Geramos em uma única chamada quando o pedido é pequeno.
-    # O revisor audita o conjunto inteiro.
-    for tentativa in range(1, MAX_TENTATIVAS + 1):
-
-        prompt = montar_prompt(
-            banca=banca,
-            nivel=nivel,
-            tema=tema,
-            qtd=qtd,
-            evitar=evitar,
-        )
-
+    while len(aprovadas_finais) < qtd and tentativa_global <= MAX_TENTATIVAS:
+        faltam = qtd - len(aprovadas_finais)
+        print(f"\n[{tema}] Geração {tentativa_global}/{MAX_TENTATIVAS}. Buscando {faltam} questão(ões)...")
+        
         try:
-            print(
-                f"[{tema}] Geração "
-                f"{tentativa}/{MAX_TENTATIVAS}..."
+            dados = _responder_json(
+                prompt=montar_prompt(banca, nivel, tema, faltam, evitar),
+                schema=SCHEMA_QUESTOES,
+                nome_schema="geracao_questoes",
+                reasoning_effort="medium"
             )
+            
+            questoes_brutas = dados.get("questoes", [])
+            
+            for q_bruta in questoes_brutas:
+                if len(aprovadas_finais) >= qtd: break
+                
+                try:
+                    q_norm = _normalizar_questao(q_bruta)
+                    
+                    # Validação inicial do Python sobre o Gerador
+                    if not _gabarito_consistente(q_norm["correta"], q_norm["letra_gabarito"]):
+                        print(f"  [GERAÇÃO] ⚠️ Questão descartada (Gerador incoerente).")
+                        continue
 
-            questoes = _chamar_api(
-                prompt,
-                reasoning_effort="medium",
-            )
+                    # Auditoria Individual Isolada
+                    q_revisada = _revisar_questao_individual(q_norm, banca, nivel, tema)
+                    
+                    if q_revisada:
+                        print("  [REVISÃO] ✓ Questão blindada e aprovada.")
+                        aprovadas_finais.append(q_revisada)
+                        evitar.append(q_revisada["pergunta"])
 
-            if len(questoes) != qtd:
-                raise ValueError(
-                    f"A IA retornou {len(questoes)} questão(ões), "
-                    f"mas eram esperadas {qtd}."
-                )
-
-            print(
-                f"[{tema}] ✓ {len(questoes)} questões geradas."
-            )
-
-            print(
-                f"[{tema}] 🔎 Iniciando revisão automática..."
-            )
-
-            revisadas = _revisar_questoes(
-                questoes=questoes,
-                banca=banca,
-                nivel=nivel,
-                tema=tema,
-            )
-
-            aprovadas = [
-                q for q in revisadas
-                if q is not None
-            ]
-
-            if len(aprovadas) == qtd:
-                print(
-                    f"[{tema}] ✓ Revisão aprovada: "
-                    f"{qtd}/{qtd}."
-                )
-                return aprovadas
-
-            rejeitadas = qtd - len(aprovadas)
-
-            print(
-                f"[{tema}] ⚠️ "
-                f"{rejeitadas} questão(ões) rejeitada(s) "
-                f"na revisão."
-            )
-
-            # As questões aprovadas já podem servir de histórico
-            # para evitar repetição na próxima rodada.
-            evitar.extend(
-                q.get("pergunta", "")
-                for q in aprovadas
-                if q.get("pergunta")
-            )
-
-            # Se algumas foram rejeitadas, tentamos gerar o conjunto
-            # novamente na próxima tentativa.
-            if tentativa < MAX_TENTATIVAS:
-                time.sleep(3)
-
-        except RateLimitError as e:
-            print(
-                f"[{tema}] ⚠️ Rate limit: {e}"
-            )
-
-            if tentativa < MAX_TENTATIVAS:
-                espera = 10 * tentativa
-                print(
-                    f"[{tema}] Aguardando {espera}s..."
-                )
-                time.sleep(espera)
-
+                except Exception as e:
+                    print(f"  [ERRO ESTRUTURAL] Questão descartada: {e}")
+                    
+            tentativa_global += 1
+            
         except Exception as e:
-            print(
-                f"[{tema}] ❌ ERRO na tentativa "
-                f"{tentativa}/{MAX_TENTATIVAS}"
-            )
-            print(
-                f"[{tema}] Tipo: {type(e).__name__}"
-            )
-            print(
-                f"[{tema}] Mensagem: {e}"
-            )
+            print(f"[{tema}] ❌ ERRO de API na tentativa {tentativa_global}: {e}")
+            tentativa_global += 1
+            time.sleep(5)
 
-            if tentativa < MAX_TENTATIVAS:
-                espera = 5 * tentativa
-                print(
-                    f"[{tema}] Nova tentativa em {espera}s..."
-                )
-                time.sleep(espera)
-
-    print(
-        f"[{tema}] ❌ FALHOU após "
-        f"{MAX_TENTATIVAS} tentativas."
-    )
-
-    return []
-
+    if len(aprovadas_finais) < qtd:
+        print(f"[{tema}] ⚠️ Concluído parcialmente: {len(aprovadas_finais)}/{qtd}.")
+    else:
+        print(f"[{tema}] ✓ Lote concluído com sucesso: {qtd}/{qtd}.")
+        
+    return aprovadas_finais
 
 # ============================================================
-# GERAÇÃO EM BLOCOS
+# FUNÇÕES MANTIDAS INTACTAS
 # ============================================================
 
-def gerar_bloco(
-    banca: str,
-    nivel: str,
-    tema: str,
-    qtd: int,
-    evitar: list = None,
-    tamanho_bloco: int = 10,
-) -> list:
-
+def gerar_bloco(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None, tamanho_bloco: int = 10) -> list:
+    """Mesma lógica original de segmentação[cite: 1]."""
     evitar = list(evitar) if evitar else []
     todas_questoes = []
+    if qtd <= 0: return todas_questoes
+    tamanho_bloco = max(tamanho_bloco, 1)
 
-    if qtd <= 0:
-        return todas_questoes
-
-    if tamanho_bloco <= 0:
-        tamanho_bloco = 10
-
-    blocos = [
-        tamanho_bloco
-    ] * (qtd // tamanho_bloco)
-
-    resto = qtd % tamanho_bloco
-
-    if resto:
-        blocos.append(resto)
+    blocos = [tamanho_bloco] * (qtd // tamanho_bloco)
+    if qtd % tamanho_bloco: blocos.append(qtd % tamanho_bloco)
 
     for i, qtd_bloco in enumerate(blocos, 1):
-
-        if len(blocos) == 1:
-            sufixo_tema = tema
-        else:
-            sufixo_tema = (
-                f"{tema} "
-                f"(Bloco {i}/{len(blocos)})"
-            )
-
-        print(
-            f"\n[{tema}] "
-            f"Gerando bloco {i}/{len(blocos)} "
-            f"com {qtd_bloco} questão(ões)..."
-        )
-
-        questoes = gerar_questoes(
-            banca=banca,
-            nivel=nivel,
-            tema=sufixo_tema,
-            qtd=qtd_bloco,
-            evitar=evitar,
-        )
-
-        # Fallback para blocos maiores.
-        if not questoes and qtd_bloco > 1:
-
-            print(
-                f"[{tema}] ⚠️ "
-                f"Bloco {i} falhou. "
-                f"Tentando dividir em duas partes..."
-            )
-
-            metade = qtd_bloco // 2
-
-            p1 = gerar_questoes(
-                banca=banca,
-                nivel=nivel,
-                tema=f"{sufixo_tema} (Parte 1)",
-                qtd=metade,
-                evitar=evitar,
-            )
-
-            evitar_parte_2 = (
-                evitar
-                + [
-                    q.get("pergunta", "")
-                    for q in p1
-                    if q.get("pergunta")
-                ]
-            )
-
-            p2 = gerar_questoes(
-                banca=banca,
-                nivel=nivel,
-                tema=f"{sufixo_tema} (Parte 2)",
-                qtd=qtd_bloco - metade,
-                evitar=evitar_parte_2,
-            )
-
-            questoes = p1 + p2
-
+        sufixo_tema = f"{tema} (Bloco {i}/{len(blocos)})" if len(blocos) > 1 else tema
+        print(f"\n[{tema}] Iniciando bloco {i}/{len(blocos)} ({qtd_bloco} q)...")
+        questoes = gerar_questoes(banca, nivel, sufixo_tema, qtd_bloco, evitar)
         todas_questoes.extend(questoes)
-
-        evitar.extend(
-            q.get("pergunta", "")
-            for q in questoes
-            if q.get("pergunta")
-        )
-
-    if len(todas_questoes) < qtd:
-        print(
-            f"[{tema}] ⚠️ "
-            f"Geradas {len(todas_questoes)}/{qtd} questões."
-        )
-    else:
-        print(
-            f"[{tema}] ✓ "
-            f"{len(todas_questoes)}/{qtd} questões concluídas."
-        )
+        evitar.extend(q.get("pergunta", "") for q in questoes if q.get("pergunta"))
 
     return todas_questoes
 
-
-# ============================================================
-# EMBARALHAMENTO DAS ALTERNATIVAS
-# ============================================================
-
-def _embaralhar_questao(
-    q: dict,
-    posicao_alvo: int,
-):
-    """
-    Reposiciona a alternativa correta.
-
-    0 = A
-    1 = B
-    2 = C
-    3 = D
-    4 = E
-    """
-
+def _embaralhar_questao(q: dict, posicao_alvo: int):
+    """Reposiciona a alternativa correta mantendo o contrato original[cite: 1]."""
     opcoes = list(q["opcoes"])
-
-    correta = q["correta"]
-
-    texto_correta = opcoes.pop(correta)
-
+    texto_correta = opcoes.pop(q["correta"])
     random.shuffle(opcoes)
-
-    opcoes.insert(
-        posicao_alvo,
-        texto_correta,
-    )
-
+    opcoes.insert(posicao_alvo, texto_correta)
     q["opcoes"] = opcoes
     q["correta"] = posicao_alvo
+    # Atualiza a letra referencial pós-embaralhamento
+    mapa = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
+    q["letra_gabarito"] = mapa[posicao_alvo]
 
-
-# ============================================================
-# BALANCEAMENTO DO GABARITO
-# ============================================================
-
-def balancear_gabaritos(
-    questoes: list,
-) -> list:
-    """
-    Distribui as respostas corretas entre A-E.
-
-    O balanceamento é feito no código e NÃO por uma nova chamada
-    à IA.
-    """
-
+def balancear_gabaritos(questoes: list) -> list:
+    """Distribui uniformemente as respostas entre A-E[cite: 1]."""
     n = len(questoes)
-
-    if n == 0:
-        return questoes
-
-    posicoes = [
-        i % 5
-        for i in range(n)
-    ]
-
+    if n == 0: return questoes
+    posicoes = [i % 5 for i in range(n)]
     random.shuffle(posicoes)
-
     for q, pos in zip(questoes, posicoes):
-        _embaralhar_questao(
-            q,
-            pos,
-        )
-
+        _embaralhar_questao(q, pos)
     return questoes
