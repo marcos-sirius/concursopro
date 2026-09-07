@@ -5,4 +5,5 @@ python-docx>=1.1
 python-dotenv>=1.0
 google-api-python-client>=2.140
 google-auth>=2.34
+requests>=2.31
 pandas>=2.2

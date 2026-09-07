@@ -1,7 +1,7 @@
 """
 Camada de armazenamento no Google Drive — equivalente ao que config_manager.py
-e excel_manager.py faziam com Path/disco local, agora usando a Service Account
-(drive_service.py) em vez de OAuth pessoal.
+e excel_manager.py faziam com Path/disco local, agora usando o token de longa
+duração da conta pessoal (drive_service.py).
 
 Estrutura no Drive (dentro da pasta raiz, em st.secrets["google_drive"]["root_folder_id"]):
   <pasta raiz>/

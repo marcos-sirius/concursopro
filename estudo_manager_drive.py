@@ -1,7 +1,7 @@
 """
 Equivalente a config_manager.py, mas para o fluxo web: reaproveita a parte
 PURA da lógica (slugify, transformação de dict) e persiste no Drive via
-Service Account (drive_storage.py).
+token de longa duração da conta pessoal (drive_storage.py).
 """
 import config_manager as cm
 import drive_storage as ds

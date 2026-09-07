@@ -1,5 +1,5 @@
 """
-Simulador EARA — versão web (Streamlit + Google Drive via Service Account)
+Simulador EARA — versão web (Streamlit + Google Drive via token de longa duração)
 ============================================================================
 Três áreas:
   1. "Responder simulado" — PÚBLICA, sem login. Qualquer pessoa com o link
@@ -18,18 +18,11 @@ no Streamlit Community Cloud):
     [google_drive]
     root_folder_id = "104KRKkS1hSEfbB6rGfbTpt0kfd0DlyyX"
 
-    [google_service_account]
-    # cole aqui TODO o conteúdo do .json baixado do Google Cloud Console
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-    client_email = "eara-drive-bot@....iam.gserviceaccount.com"
-    client_id = "..."
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "..."
+    [google_oauth]
+    # gerado uma única vez rodando obter_refresh_token.py no seu computador
+    client_id = "SUBSTITUA.apps.googleusercontent.com"
+    client_secret = "SUBSTITUA"
+    refresh_token = "SUBSTITUA"
 """
 import os
 
