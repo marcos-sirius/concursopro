@@ -237,8 +237,7 @@ def pagina_gestao():
                     if questoes:
                         blocos_eixo.append((tema, questoes))
                     else:
-                        detalhe = f" — {ia.ULTIMO_ERRO}" if ia.ULTIMO_ERRO else ""
-                        st.write(f"  ⚠️ Falhou ao gerar: {tema}{detalhe}")
+                        st.write(f"  ⚠️ Falhou ao gerar: {tema}")
 
                 todas_questoes_eixo = [q for _, qs in blocos_eixo for q in qs]
                 if todas_questoes_eixo:
