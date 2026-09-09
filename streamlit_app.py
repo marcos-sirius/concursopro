@@ -4,8 +4,8 @@ Simulador EARA — versão web (Streamlit + Google Drive via token de longa dura
 
 Três áreas:
 
-1. "Responder simulado" — protegida por código de acesso individual (não é
-   senha de admin: cada participante tem um código próprio, cadastrado em
+1. "Responder simulado" — protegida por USUÁRIO + SENHA individuais (não é
+   senha de admin: cada participante tem login próprio, cadastrado em
    "Gestão de estudos", que define QUAIS estudos aquela pessoa pode ver).
 
 2. "Gestão de estudos" — protegida por senha (admin_password nos Secrets).
@@ -62,24 +62,25 @@ pagina = st.sidebar.radio("Navegação", PAGINAS)
 def pagina_responder():
     st.title("📝 Responder simulado")
 
-    # --- Login por código de acesso ---
+    # --- Login por usuário + senha ---
     if "participante" not in st.session_state:
-        st.write("Digite seu código de acesso pra ver os estudos liberados pra você.")
-        codigo = st.text_input("Código de acesso", type="password")
+        st.write("Entre com seu usuário e senha pra ver os estudos liberados pra você.")
+        usuario_login = st.text_input("Usuário")
+        senha_login = st.text_input("Senha", type="password")
         if st.button("Entrar", type="primary"):
-            participante = pm.autenticar(codigo)
+            participante = pm.autenticar(usuario_login, senha_login)
             if participante:
                 st.session_state["participante"] = participante
                 st.rerun()
             else:
-                st.error("Código inválido. Confira com quem te cadastrou.")
+                st.error("Usuário ou senha inválidos. Confira com quem te cadastrou.")
         return
 
     participante = st.session_state["participante"]
 
     topo_esq, topo_dir = st.columns([4, 1])
     with topo_esq:
-        st.caption(f"Logado como: **{participante['nome']}**")
+        st.caption(f"Logado como: **{participante['usuario']}**")
     with topo_dir:
         if st.button("Trocar"):
             del st.session_state["participante"]
@@ -139,7 +140,7 @@ def pagina_responder():
         respostas_completas = [
             {**q, "resposta_idx": respostas_usuario[i]} for i, q in enumerate(questoes)
         ]
-        rm.gravar_respostas(wb, numero_simulacao, participante["nome"], respostas_completas)
+        rm.gravar_respostas(wb, numero_simulacao, participante["usuario"], respostas_completas)
         ds.salvar_workbook(folder_id, wb)
 
         acertos = sum(1 for r in respostas_completas if r["resposta_idx"] == r["correta"])
@@ -184,14 +185,20 @@ def pagina_gestao():
 
     with st.expander("👥 Gerenciar participantes"):
         st.caption(
-            "Cada participante recebe um código de acesso próprio (não é a "
-            "senha de admin) e só enxerga, na tela \"Responder simulado\", "
-            "os estudos que você liberar aqui pra ele."
+            "Cada participante recebe login próprio (usuário + senha, não é "
+            "a senha de admin) e só enxerga, na tela \"Responder simulado\", "
+            "os estudos que você liberar aqui pra ele. Usuário não diferencia "
+            "maiúsculas de minúsculas (Ana = ana = ANA)."
         )
 
         with st.form("form_participante"):
-            nome_p = st.text_input("Nome do participante")
-            codigo_p = st.text_input("Código de acesso (o que a pessoa vai digitar)")
+            usuario_p = st.text_input("Usuário")
+            email_p = st.text_input("E-mail")
+            senha_p = st.text_input(
+                "Senha",
+                type="password",
+                help="Deixe em branco para manter a senha atual, se estiver editando alguém que já existe.",
+            )
             acesso_total = st.checkbox("Acesso a TODOS os estudos (atuais e futuros)")
             estudos_selecionados = st.multiselect(
                 "Estudos permitidos", nomes_estudos, disabled=acesso_total,
@@ -199,16 +206,20 @@ def pagina_gestao():
             salvar_p = st.form_submit_button("Salvar participante")
 
         if salvar_p:
-            if not nome_p or not codigo_p:
-                st.error("Preencha nome e código de acesso.")
+            if not usuario_p:
+                st.error("Preencha o usuário.")
             else:
-                with st.status(f"Salvando participante '{nome_p}'...", expanded=True) as status_p:
-                    permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
-                    st.write("Gravando participantes.json no Drive...")
-                    pm.adicionar_ou_atualizar(nome_p, codigo_p, permitidos)
-                    status_p.update(label=f"✅ Participante '{nome_p}' salvo!", state="complete")
-                st.session_state["msg_sucesso"] = f"Participante '{nome_p}' salvo."
-                st.rerun()
+                with st.status(f"Salvando participante '{usuario_p}'...", expanded=True) as status_p:
+                    try:
+                        permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
+                        st.write("Gravando participantes.json no Drive...")
+                        pm.adicionar_ou_atualizar(usuario_p, email_p, senha_p or None, permitidos)
+                        status_p.update(label=f"✅ Participante '{usuario_p}' salvo!", state="complete")
+                        st.session_state["msg_sucesso"] = f"Participante '{usuario_p}' salvo."
+                        st.rerun()
+                    except ValueError as e:
+                        status_p.update(label="❌ Não foi possível salvar.", state="error")
+                        st.error(str(e))
 
         with st.spinner("Carregando participantes..."):
             participantes = pm.carregar_participantes()
@@ -218,15 +229,16 @@ def pagina_gestao():
             for p in participantes:
                 permitidos = p.get("estudos_permitidos", [])
                 acesso_txt = "Todos os estudos" if pm.TODOS in permitidos else (", ".join(permitidos) or "Nenhum")
+                email_txt = f" · {p['email']}" if p.get("email") else ""
                 col_info, col_botao = st.columns([4, 1])
                 with col_info:
-                    st.write(f"- **{p['nome']}** (código: `{p['codigo']}`) → {acesso_txt}")
+                    st.write(f"- **{p['usuario']}**{email_txt} → {acesso_txt}")
                 with col_botao:
-                    if st.button("Remover", key=f"remover_participante_{p['codigo']}"):
-                        with st.status(f"Removendo '{p['nome']}'...", expanded=True) as status_r:
-                            pm.remover(p["codigo"])
-                            status_r.update(label=f"✅ '{p['nome']}' removido!", state="complete")
-                        st.session_state["msg_sucesso"] = f"Participante '{p['nome']}' removido."
+                    if st.button("Remover", key=f"remover_participante_{p['usuario']}"):
+                        with st.status(f"Removendo '{p['usuario']}'...", expanded=True) as status_r:
+                            pm.remover(p["usuario"])
+                            status_r.update(label=f"✅ '{p['usuario']}' removido!", state="complete")
+                        st.session_state["msg_sucesso"] = f"Participante '{p['usuario']}' removido."
                         st.rerun()
         else:
             st.caption("Nenhum participante cadastrado ainda.")
