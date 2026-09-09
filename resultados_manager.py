@@ -43,7 +43,8 @@ def listar_simulacoes_disponiveis(wb: Workbook) -> list:
 def carregar_questoes_da_simulacao(wb: Workbook, numero_simulacao: int) -> list:
     """
     Lê o Consolidado e devolve as questões de uma simulação específica, no
-    formato: [{"eixo", "tema", "pergunta", "opcoes": [...], "correta": int}, ...]
+    formato: [{"eixo", "tema", "pergunta", "opcoes": [...], "correta": int,
+    "comentario": str}, ...]
     """
     ws = wb["Consolidado"]
     questoes = []
@@ -53,6 +54,7 @@ def carregar_questoes_da_simulacao(wb: Workbook, numero_simulacao: int) -> list:
             continue
         opcoes = [row[3], row[4], row[5], row[6], row[7]]
         correta_letra = row[8]
+        comentario = row[9] if len(row) > 9 and row[9] is not None else ""
         tema = row[10] if len(row) > 10 else ""
 
         # "correta" no Consolidado é gravada como a LETRA (A-E); convertemos
@@ -69,6 +71,7 @@ def carregar_questoes_da_simulacao(wb: Workbook, numero_simulacao: int) -> list:
             "pergunta": pergunta,
             "opcoes": opcoes,
             "correta": idx_correta,
+            "comentario": comentario,
         })
     return questoes
 

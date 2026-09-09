@@ -1,13 +1,14 @@
 """
 Camada de armazenamento no Google Drive — equivalente ao que config_manager.py
 e excel_manager.py faziam com Path/disco local, agora usando o token de longa
-duração da conta pessoal (drive_service.py).
+duração da sua conta (drive_service.py) em vez de acesso a disco.
 
 Estrutura no Drive (dentro da pasta raiz, em st.secrets["google_drive"]["root_folder_id"]):
   <pasta raiz>/
+    participantes.json        (lista de quem pode responder + quais estudos)
     <slug_do_estudo_1>/
         config.json
-        simulado.xlsx      (guias por eixo + Consolidado + Resultados)
+        simulado.xlsx          (guias por eixo + Consolidado + Resultados)
     <slug_do_estudo_2>/
         ...
 """
@@ -37,6 +38,22 @@ def _buscar(nome: str, parent_id: str, mime: str | None = None) -> dict | None:
     resp = service.files().list(q=q, fields="files(id, name, mimeType)").execute()
     arquivos = resp.get("files", [])
     return arquivos[0] if arquivos else None
+
+
+# Wrappers públicos de _buscar/_baixar_bytes/_upload_bytes — reutilizados por
+# outros módulos (ex: participantes_manager.py) que também precisam ler/
+# gravar um arquivo solto na pasta raiz, sem duplicar a lógica de busca.
+def buscar_arquivo(nome: str, parent_id: str, mime: str | None = None) -> dict | None:
+    return _buscar(nome, parent_id, mime)
+
+
+def baixar_bytes(file_id: str) -> bytes:
+    return _baixar_bytes(file_id)
+
+
+def salvar_bytes(nome: str, dados: bytes, parent_id: str, mime_type: str,
+                  file_id: str | None = None) -> dict:
+    return _upload_bytes(nome, dados, parent_id, mime_type, file_id=file_id)
 
 
 def listar_estudos() -> list:

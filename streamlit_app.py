@@ -4,11 +4,13 @@ Simulador EARA — versão web (Streamlit + Google Drive via token de longa dura
 
 Três áreas:
 
-1. "Responder simulado" — PÚBLICA, sem login. Qualquer pessoa com o link
-   escolhe um estudo + número de simulação, digita o nome e responde.
+1. "Responder simulado" — protegida por código de acesso individual (não é
+   senha de admin: cada participante tem um código próprio, cadastrado em
+   "Gestão de estudos", que define QUAIS estudos aquela pessoa pode ver).
 
 2. "Gestão de estudos" — protegida por senha (admin_password nos Secrets).
-   Criar estudos, ressincronizar eixos, gerar novos simulados via IA.
+   Criar estudos, ressincronizar eixos, gerar novos simulados via IA,
+   cadastrar participantes e definir o que cada um pode acessar.
 
 3. "Desempenho" — protegida por senha. Dashboard com o histórico de
    respostas de todo mundo, cruzando por participante/eixo/tema/simulado.
@@ -44,6 +46,7 @@ import drive_storage as ds
 import estudo_manager_drive as emd
 import excel_manager as em
 import ia_gerador as ia
+import participantes_manager as pm
 import resultados_manager as rm
 import sorteio
 
@@ -59,13 +62,42 @@ pagina = st.sidebar.radio("Navegação", PAGINAS)
 def pagina_responder():
     st.title("📝 Responder simulado")
 
-    estudos = emd.listar_estudos()
-    if not estudos:
-        st.info("Nenhum estudo disponível ainda.")
+    # --- Login por código de acesso ---
+    if "participante" not in st.session_state:
+        st.write("Digite seu código de acesso pra ver os estudos liberados pra você.")
+        codigo = st.text_input("Código de acesso", type="password")
+        if st.button("Entrar", type="primary"):
+            participante = pm.autenticar(codigo)
+            if participante:
+                st.session_state["participante"] = participante
+                st.rerun()
+            else:
+                st.error("Código inválido. Confira com quem te cadastrou.")
         return
 
-    nome_estudo = st.selectbox("Estudo", [n for n, _ in estudos])
-    folder_id = dict(estudos)[nome_estudo]
+    participante = st.session_state["participante"]
+
+    topo_esq, topo_dir = st.columns([4, 1])
+    with topo_esq:
+        st.caption(f"Logado como: **{participante['nome']}**")
+    with topo_dir:
+        if st.button("Trocar"):
+            del st.session_state["participante"]
+            st.rerun()
+
+    # --- Filtra estudos pelo que esse participante pode acessar ---
+    todos_estudos = emd.listar_estudos()
+    estudos_permitidos = [
+        (nome, folder_id) for nome, folder_id in todos_estudos
+        if pm.pode_acessar(participante, nome)
+    ]
+
+    if not estudos_permitidos:
+        st.info("Você ainda não tem acesso a nenhum estudo. Fale com quem te cadastrou.")
+        return
+
+    nome_estudo = st.selectbox("Estudo", [n for n, _ in estudos_permitidos])
+    folder_id = dict(estudos_permitidos)[nome_estudo]
 
     wb = ds.baixar_workbook(folder_id)
     simulacoes = rm.listar_simulacoes_disponiveis(wb)
@@ -74,16 +106,11 @@ def pagina_responder():
         return
 
     numero_simulacao = st.selectbox("Número do simulado", simulacoes)
-    participante = st.text_input("Seu nome")
 
     chave_questoes = f"questoes_{folder_id}_{numero_simulacao}"
     if chave_questoes not in st.session_state:
         st.session_state[chave_questoes] = rm.carregar_questoes_da_simulacao(wb, numero_simulacao)
     questoes = st.session_state[chave_questoes]
-
-    if not participante:
-        st.warning("Digite seu nome para começar.")
-        return
 
     st.divider()
 
@@ -112,22 +139,26 @@ def pagina_responder():
         respostas_completas = [
             {**q, "resposta_idx": respostas_usuario[i]} for i, q in enumerate(questoes)
         ]
-        rm.gravar_respostas(wb, numero_simulacao, participante, respostas_completas)
+        rm.gravar_respostas(wb, numero_simulacao, participante["nome"], respostas_completas)
         ds.salvar_workbook(folder_id, wb)
 
         acertos = sum(1 for r in respostas_completas if r["resposta_idx"] == r["correta"])
         total = len(respostas_completas)
         st.success(f"✅ Respostas enviadas! Você acertou {acertos}/{total} ({acertos/total:.0%}).")
 
-        with st.expander("Ver gabarito comentado"):
+        with st.expander("Ver gabarito comentado", expanded=True):
             for i, r in enumerate(respostas_completas):
                 certo = r["resposta_idx"] == r["correta"]
                 icone = "✅" if certo else "❌"
-                st.write(
+                st.markdown(
                     f"{icone} **{i+1}.** Sua resposta: {letras[r['resposta_idx']]}) "
                     f"{r['opcoes'][r['resposta_idx']]} — "
                     f"Correta: {letras[r['correta']]}) {r['opcoes'][r['correta']]}"
                 )
+                comentario = (r.get("comentario") or "").strip()
+                if comentario:
+                    st.caption(comentario)
+                st.write("")
 
 
 # =========================================================================
@@ -149,7 +180,51 @@ def pagina_gestao():
         st.success(st.session_state.pop("msg_sucesso"))
 
     estudos = emd.listar_estudos()
-    opcoes = ["➕ Novo estudo"] + [nome for nome, _ in estudos]
+    nomes_estudos = [n for n, _ in estudos]
+
+    with st.expander("👥 Gerenciar participantes"):
+        st.caption(
+            "Cada participante recebe um código de acesso próprio (não é a "
+            "senha de admin) e só enxerga, na tela \"Responder simulado\", "
+            "os estudos que você liberar aqui pra ele."
+        )
+
+        with st.form("form_participante"):
+            nome_p = st.text_input("Nome do participante")
+            codigo_p = st.text_input("Código de acesso (o que a pessoa vai digitar)")
+            acesso_total = st.checkbox("Acesso a TODOS os estudos (atuais e futuros)")
+            estudos_selecionados = st.multiselect(
+                "Estudos permitidos", nomes_estudos, disabled=acesso_total,
+            )
+            salvar_p = st.form_submit_button("Salvar participante")
+
+        if salvar_p:
+            if not nome_p or not codigo_p:
+                st.error("Preencha nome e código de acesso.")
+            else:
+                permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
+                pm.adicionar_ou_atualizar(nome_p, codigo_p, permitidos)
+                st.session_state["msg_sucesso"] = f"Participante '{nome_p}' salvo."
+                st.rerun()
+
+        participantes = pm.carregar_participantes()
+        if participantes:
+            st.write("**Participantes cadastrados:**")
+            for p in participantes:
+                permitidos = p.get("estudos_permitidos", [])
+                acesso_txt = "Todos os estudos" if pm.TODOS in permitidos else (", ".join(permitidos) or "Nenhum")
+                col_info, col_botao = st.columns([4, 1])
+                with col_info:
+                    st.write(f"- **{p['nome']}** (código: `{p['codigo']}`) → {acesso_txt}")
+                with col_botao:
+                    if st.button("Remover", key=f"remover_participante_{p['codigo']}"):
+                        pm.remover(p["codigo"])
+                        st.session_state["msg_sucesso"] = f"Participante '{p['nome']}' removido."
+                        st.rerun()
+        else:
+            st.caption("Nenhum participante cadastrado ainda.")
+
+    opcoes = ["➕ Novo estudo"] + nomes_estudos
 
     # se acabamos de criar um estudo, já abre a página nele em vez de
     # voltar para "➕ Novo estudo" com o formulário vazio

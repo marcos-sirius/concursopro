@@ -1,13 +1,24 @@
 """
-Geração e revisão de questões via API da OpenAI (Versão 3 - LLMOps).
+Geração de questões via API da OpenAI, usando a Responses API com Structured
+Outputs (schema strict) e reasoning effort configurável.
 
 Fluxos implementados:
 1. Geração (GPT) com exigência de duplo-fator no gabarito (índice + letra).
 2. Sanitização (Python) limpando A), B), C) das alternativas via Regex.
 3. Validação Lógica (Python) confirmando se o índice bate com a letra defendida.
-4. Revisão Individual (GPT) focada e isolada por questão para evitar alucinações.
-5. Loop de Substituição: rejeitadas não entram; substitutas são geradas até bater a meta.
-6. Balanceamento e persistência mantidos.
+4. Loop de retentativa: se uma questão sair inconsistente, gera substituta
+   até bater a meta (tudo em Python, sem chamada extra de auditoria por IA).
+5. Balanceamento e persistência mantidos.
+
+OBS: a versão anterior deste arquivo tinha uma etapa de "auditoria" com uma
+chamada extra de IA (reasoning_effort="high") por QUESTÃO, além da chamada
+de geração. Isso multiplicava o custo por simulado em 6-17x (medido: de
+~$0,02-0,21 para ~$1,24-3,49 por simulado de 70 questões), porque cada
+auditoria gastava tokens de raciocínio invisíveis cobrados como output.
+Removida por ora — o gpt-5.6-terra já vem saindo tecnicamente sólido sem
+essa camada extra, e a validação Python (abaixo) já pega os erros estruturais
+mais comuns (gabarito inconsistente, menos/mais de 5 alternativas, etc.)
+sem gastar nenhum token adicional.
 """
 
 import json
@@ -26,16 +37,7 @@ from openai import OpenAI, RateLimitError
 load_dotenv()
 
 MODEL = "gpt-5.6-terra"
-MAX_TENTATIVAS = 5 # Aumentado para suportar o loop de substituição
-MAX_SUBSTITUTAS = 2
-
-# Marcador literal que a IA deve escrever no comentário no lugar da letra da
-# alternativa correta. Como a ordem das alternativas só é decidida DEPOIS
-# (em balancear_gabaritos), pedir a letra de verdade deixaria o comentário
-# desatualizado assim que a questão fosse embaralhada. Em vez disso, a IA
-# escreve esse marcador fixo, e o Python faz um simples replace() pela letra
-# final — sem gastar nenhuma chamada extra de API.
-MARCADOR_CORRETA = "[[LETRA_CORRETA]]"
+MAX_TENTATIVAS = 5  # quantas vezes tenta regenerar questões rejeitadas por Python
 
 api_key = os.environ.get("OPENAI_API_KEY")
 
@@ -47,6 +49,30 @@ if not api_key:
     )
 
 client = OpenAI(api_key=api_key)
+
+# ============================================================
+# MARCADORES DE LETRA (resolvidos em Python, sem gastar API)
+# ============================================================
+
+def marcador_opcao(indice_original: int) -> str:
+    """
+    Marcador literal que a IA deve escrever no comentário no lugar de QUALQUER
+    letra de alternativa (a correta OU as erradas). 'indice_original' é a
+    posição (0-4) em que a IA gerou aquela alternativa no array "opcoes" —
+    ou seja, é fixo desde a geração, independente de pra onde a alternativa
+    for parar depois do embaralhamento em balancear_gabaritos().
+
+    Por que isso existe: a ordem final das alternativas só é decidida DEPOIS
+    da questão ser gerada. Se o comentário citasse a letra de verdade (ex:
+    "a alternativa C está correta, diferente de A e E"), esse texto ficaria
+    desatualizado assim que a posição mudasse. Com o marcador, o Python troca
+    cada um pela letra final certa em _embaralhar_questao(), num simples
+    replace() — sem gastar nenhuma chamada extra de API.
+    """
+    return f"[[LETRA_OPCAO_{indice_original + 1}]]"
+
+
+MARCADORES_TODAS_OPCOES = [marcador_opcao(i) for i in range(5)]
 
 # ============================================================
 # SCHEMAS
@@ -102,44 +128,6 @@ SCHEMA_QUESTOES = {
     "required": ["questoes"],
 }
 
-# Modificado para avaliar uma questão por vez
-SCHEMA_REVISAO = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": [
-                "aprovada",
-                "corrigir_gabarito",
-                "rejeitar",
-            ],
-        },
-        "correta": {
-            "type": "integer",
-            # "minimum"/"maximum" removidos — não suportados em strict mode
-            # (ver comentário equivalente em SCHEMA_QUESTOES acima).
-        },
-        "letra_gabarito": {
-            "type": "string",
-            "enum": ["A", "B", "C", "D", "E"]
-        },
-        "comentario": {
-            "type": "string"
-        },
-        "motivo": {
-            "type": "string"
-        },
-    },
-    "required": [
-        "status",
-        "correta",
-        "letra_gabarito",
-        "comentario",
-        "motivo",
-    ],
-}
-
 # ============================================================
 # LÓGICA DE VALIDAÇÃO PYTHON (JUIZ)
 # ============================================================
@@ -179,55 +167,24 @@ REGRAS OBRIGATÓRIAS:
 4. Em questões de lógica ou matemática, resolva o problema antes de escolher a resposta.
 5. O campo "correta" deve apontar para a alternativa certa: 0=A, 1=B, 2=C, 3=D, 4=E.
 6. O campo "letra_gabarito" DEVE ser a letra correspondente ao índice (A, B, C, D ou E).
-7. Sempre que o comentário precisar se referir à alternativa correta PELA LETRA,
-   use OBRIGATORIAMENTE o texto literal {MARCADOR_CORRETA} no lugar da letra —
-   NUNCA escreva a letra de verdade (ex: NÃO escreva "a alternativa C está
-   correta"; escreva "a alternativa {MARCADOR_CORRETA} está correta"). Isso é
-   obrigatório porque a ordem das alternativas é reorganizada DEPOIS de gerada
-   a questão, e o Python substitui esse marcador pela letra final automaticamente.
-   Fora isso, pode explicar o raciocínio normalmente, inclusive citando o
-   conteúdo de outras alternativas (sem citar a letra delas).
+7. NUNCA escreva uma letra literal (A, B, C, D ou E) no texto do "comentario"
+   — nem pra dizer qual está certa, nem pra explicar por que as outras estão
+   erradas. Em vez disso, use o marcador correspondente à ORDEM em que você
+   gerou cada alternativa no array "opcoes":
+     - a 1ª alternativa do array (índice 0) = {MARCADORES_TODAS_OPCOES[0]}
+     - a 2ª alternativa do array (índice 1) = {MARCADORES_TODAS_OPCOES[1]}
+     - a 3ª alternativa do array (índice 2) = {MARCADORES_TODAS_OPCOES[2]}
+     - a 4ª alternativa do array (índice 3) = {MARCADORES_TODAS_OPCOES[3]}
+     - a 5ª alternativa do array (índice 4) = {MARCADORES_TODAS_OPCOES[4]}
+   Exemplo (supondo que a certa seja a 3ª opção do array e você queira citar
+   a 1ª como errada): "a alternativa {MARCADORES_TODAS_OPCOES[2]} está
+   correta, ao contrário de {MARCADORES_TODAS_OPCOES[0]}, que afirma...".
+   Isso é obrigatório porque a ordem final das alternativas só é decidida
+   DEPOIS de gerada a questão (em balancear_gabaritos), e o Python substitui
+   cada marcador pela letra final correspondente automaticamente.
 8. NÃO escreva a letra da alternativa dentro do texto da opção. Gere apenas o conteúdo da alternativa.
 
 {bloco_evitar}
-"""
-
-# ============================================================
-# PROMPT DE REVISÃO INDIVIDUAL
-# ============================================================
-
-def montar_prompt_revisao_individual(questao: dict, banca: str, nivel: str, tema: str) -> str:
-    questao_json = json.dumps(questao, ensure_ascii=False, indent=2)
-
-    return f"""
-Você é o REVISOR FINAL de um banco de questões de concursos públicos.
-Sua função é auditar ESTA ÚNICA QUESTÃO antes que ela seja liberada.
-
-Contexto da Prova:
-Banca: {banca}
-Nível: {nivel}
-Tema: {tema}
-
-QUESTÃO PARA AUDITAR:
-{questao_json}
-
-Verifique obrigatoriamente:
-1. Se a pergunta está bem formulada.
-2. Se existe exatamente UMA alternativa inequivocamente correta.
-3. Se a alternativa indicada em "correta" e "letra_gabarito" está correta.
-4. Refaça cálculos e validações lógicas do zero.
-5. O comentário contradiz o gabarito?
-6. O comentário cita uma LETRA de verdade (A, B, C, D ou E) em vez do marcador
-   "{MARCADOR_CORRETA}"? Se sim, isso é um ERRO — substitua a letra pelo
-   marcador literal "{MARCADOR_CORRETA}" no texto do comentário. NUNCA remova
-   o marcador nem o troque por uma letra — ele é resolvido pelo Python depois,
-   após a ordem final das alternativas ser decidida.
-
-- "aprovada": Questão impecável, gabarito 100% correto e comentário usando o marcador (não uma letra) para se referir à resposta certa.
-- "corrigir_gabarito": A questão é boa, mas o gerador errou o índice/letra ou o comentário (incluindo citação de letra no texto). Corrija-os.
-- "rejeitar": Questão ambígua, cálculo errado, múltiplas corretas ou sem resposta.
-
-Lembre-se: Você deve preencher "correta" (0 a 4) e "letra_gabarito" (A a E) sempre de forma coerente entre si.
 """
 
 # ============================================================
@@ -284,40 +241,7 @@ def _normalizar_questao(q: dict) -> dict:
     }
 
 # ============================================================
-# AUDITORIA INDIVIDUAL
-# ============================================================
-
-def _revisar_questao_individual(questao: dict, banca: str, nivel: str, tema: str) -> dict:
-    prompt = montar_prompt_revisao_individual(questao, banca, nivel, tema)
-    
-    revisao = _responder_json(
-        prompt=prompt,
-        schema=SCHEMA_REVISAO,
-        nome_schema="revisao_individual",
-        reasoning_effort="high", # Aumentado para high na auditoria fina
-    )
-
-    status = revisao.get("status")
-    motivo = revisao.get("motivo", "")
-
-    if status == "rejeitar":
-        print(f"  [REVISÃO] ❌ Rejeitada: {motivo}")
-        return None
-
-    # Validação Python do Revisor
-    if not _gabarito_consistente(revisao["correta"], revisao["letra_gabarito"]):
-        print(f"  [REVISÃO] ❌ Rejeitada: Revisor falhou na coerência índice ({revisao['correta']}) vs letra ({revisao['letra_gabarito']}).")
-        return None
-
-    q_final = dict(questao)
-    q_final["correta"] = revisao["correta"]
-    q_final["letra_gabarito"] = revisao["letra_gabarito"]
-    q_final["comentario"] = revisao.get("comentario", "").strip()
-    
-    return q_final
-
-# ============================================================
-# FLUXO PRINCIPAL COM LOOP DE SUBSTITUIÇÃO
+# FLUXO PRINCIPAL COM LOOP DE RETENTATIVA
 # ============================================================
 
 def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = None) -> list:
@@ -347,18 +271,17 @@ def gerar_questoes(banca: str, nivel: str, tema: str, qtd: int, evitar: list = N
                 try:
                     q_norm = _normalizar_questao(q_bruta)
                     
-                    # Validação inicial do Python sobre o Gerador
+                    # Validação em Python (sem chamada extra de API): confere
+                    # se o índice numérico bate com a letra que o modelo
+                    # declarou. Se não bater, descarta e tenta de novo no
+                    # próximo loop — mais barato que auditar via IA.
                     if not _gabarito_consistente(q_norm["correta"], q_norm["letra_gabarito"]):
-                        print(f"  [GERAÇÃO] ⚠️ Questão descartada (Gerador incoerente).")
+                        print(f"  [GERAÇÃO] ⚠️ Questão descartada (índice/letra incoerentes).")
                         continue
 
-                    # Auditoria Individual Isolada
-                    q_revisada = _revisar_questao_individual(q_norm, banca, nivel, tema)
-                    
-                    if q_revisada:
-                        print("  [REVISÃO] ✓ Questão blindada e aprovada.")
-                        aprovadas_finais.append(q_revisada)
-                        evitar.append(q_revisada["pergunta"])
+                    print("  [GERAÇÃO] ✓ Questão aprovada.")
+                    aprovadas_finais.append(q_norm)
+                    evitar.append(q_norm["pergunta"])
 
                 except Exception as e:
                     print(f"  [ERRO ESTRUTURAL] Questão descartada: {e}")
@@ -412,35 +335,65 @@ def _comentario_cita_letra(comentario: str) -> bool:
 
 
 def _embaralhar_questao(q: dict, posicao_alvo: int):
-    """Reposiciona a alternativa correta mantendo o contrato original[cite: 1]."""
-    opcoes = list(q["opcoes"])
-    texto_correta = opcoes.pop(q["correta"])
-    random.shuffle(opcoes)
-    opcoes.insert(posicao_alvo, texto_correta)
-    q["opcoes"] = opcoes
-    q["correta"] = posicao_alvo
-    # Atualiza a letra referencial pós-embaralhamento
-    mapa = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
-    letra_final = mapa[posicao_alvo]
-    q["letra_gabarito"] = letra_final
+    """
+    Reposiciona a alternativa correta para 'posicao_alvo' (0=A ... 4=E),
+    embaralhando as demais nas posições restantes — e resolve TODOS os
+    marcadores [[LETRA_OPCAO_N]] do comentário pela letra FINAL de cada
+    alternativa (N é a posição ORIGINAL, 1-indexada, em que a IA gerou
+    aquela alternativa, fixa desde a geração).
+    """
+    opcoes_originais = list(q["opcoes"])
+    indice_correta_original = q["correta"]
 
-    # Resolve o marcador {MARCADOR_CORRETA} pela letra FINAL, já com a
-    # posição definitiva — é aqui que a mágica acontece, em Python puro,
-    # sem gastar nenhuma chamada extra de API.
+    # Monta a nova ordem: a correta vai para 'posicao_alvo'; as outras 4
+    # (identificadas pelo índice ORIGINAL) são embaralhadas nas posições
+    # restantes.
+    indices_restantes = [i for i in range(5) if i != indice_correta_original]
+    random.shuffle(indices_restantes)
+
+    ordem_final = [None] * 5  # ordem_final[posição_final] = índice ORIGINAL
+    ordem_final[posicao_alvo] = indice_correta_original
+    it_restantes = iter(indices_restantes)
+    for k in range(5):
+        if ordem_final[k] is None:
+            ordem_final[k] = next(it_restantes)
+
+    mapa = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E'}
+
+    q["opcoes"] = [opcoes_originais[indice_original] for indice_original in ordem_final]
+    q["correta"] = posicao_alvo
+    q["letra_gabarito"] = mapa[posicao_alvo]
+
+    # índice ORIGINAL -> letra FINAL (depois do embaralhamento)
+    letra_final_por_indice_original = {
+        indice_original: mapa[posicao_final]
+        for posicao_final, indice_original in enumerate(ordem_final)
+    }
+
+    # Resolve cada um dos 5 marcadores possíveis pela letra final — é aqui
+    # que a mágica acontece, em Python puro, sem gastar nenhuma chamada
+    # extra de API. Um comentário pode citar 0, 1 ou vários marcadores
+    # (ex: "a correta é [[LETRA_OPCAO_3]], diferente de [[LETRA_OPCAO_1]] e
+    # [[LETRA_OPCAO_5]]") — todos são resolvidos na mesma passada.
     comentario = q.get("comentario", "") or ""
-    if MARCADOR_CORRETA in comentario:
-        q["comentario"] = comentario.replace(MARCADOR_CORRETA, letra_final)
-    elif _comentario_cita_letra(comentario):
+    algum_marcador_encontrado = False
+    for indice_original, letra_final in letra_final_por_indice_original.items():
+        marcador = marcador_opcao(indice_original)
+        if marcador in comentario:
+            algum_marcador_encontrado = True
+            comentario = comentario.replace(marcador, letra_final)
+    q["comentario"] = comentario
+
+    if not algum_marcador_encontrado and _comentario_cita_letra(comentario):
         # Rede de segurança: a IA escapou da regra e escreveu uma letra de
-        # verdade em vez do marcador. Não corrigimos automaticamente (arriscado
-        # — o comentário pode citar várias letras, inclusive de distratores),
-        # só avisamos nos logs pra você saber que essa questão específica
-        # precisa de revisão manual.
+        # verdade em vez de marcador. Não corrigimos automaticamente
+        # (arriscado — não sabemos a qual alternativa original aquela letra
+        # se referia), só avisamos nos logs pra revisão manual pontual.
         pergunta_resumida = (q.get("pergunta", "") or "")[:60]
         print(
-            f"  ⚠️ [ATENÇÃO] Comentário citou uma letra literal em vez do "
-            f"marcador {MARCADOR_CORRETA} — pode estar desatualizado após o "
-            f"embaralhamento. Pergunta: \"{pergunta_resumida}...\""
+            f"  ⚠️ [ATENÇÃO] Comentário citou uma letra literal em vez de "
+            f"marcador — pode estar desatualizado após o embaralhamento. "
+            f"Pergunta: \"{pergunta_resumida}...\""
         )
 
 def balancear_gabaritos(questoes: list) -> list:
