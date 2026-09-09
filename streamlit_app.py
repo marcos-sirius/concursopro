@@ -226,19 +226,30 @@ def pagina_gestao():
 
         if participantes:
             st.write("**Participantes cadastrados:**")
-            for p in participantes:
+            for i, p in enumerate(participantes):
+                # .get() com fallback pra não quebrar em registros do FORMATO
+                # ANTIGO (nome/codigo), que podem ter sobrado no Drive de
+                # antes dessa mudança de esquema.
+                identificador = p.get("usuario") or p.get("nome") or p.get("codigo") or "(registro sem nome)"
+                eh_legado = not p.get("usuario")
+
                 permitidos = p.get("estudos_permitidos", [])
                 acesso_txt = "Todos os estudos" if pm.TODOS in permitidos else (", ".join(permitidos) or "Nenhum")
                 email_txt = f" · {p['email']}" if p.get("email") else ""
+                aviso_legado = " — ⚠️ *cadastro antigo, incompatível com o login atual; remova e recadastre*" if eh_legado else ""
+
                 col_info, col_botao = st.columns([4, 1])
                 with col_info:
-                    st.write(f"- **{p['usuario']}**{email_txt} → {acesso_txt}")
+                    st.write(f"- **{identificador}**{email_txt} → {acesso_txt}{aviso_legado}")
                 with col_botao:
-                    if st.button("Remover", key=f"remover_participante_{p['usuario']}"):
-                        with st.status(f"Removendo '{p['usuario']}'...", expanded=True) as status_r:
-                            pm.remover(p["usuario"])
-                            status_r.update(label=f"✅ '{p['usuario']}' removido!", state="complete")
-                        st.session_state["msg_sucesso"] = f"Participante '{p['usuario']}' removido."
+                    # a chave usa o índice "i" pra nunca colidir, mesmo que dois
+                    # registros tenham o mesmo identificador (ex: um legado e um
+                    # novo com o mesmo nome, antes de você apagar o antigo)
+                    if st.button("Remover", key=f"remover_participante_{i}_{identificador}"):
+                        with st.status(f"Removendo '{identificador}'...", expanded=True) as status_r:
+                            pm.remover_por_indice(i) if eh_legado else pm.remover(identificador)
+                            status_r.update(label=f"✅ '{identificador}' removido!", state="complete")
+                        st.session_state["msg_sucesso"] = f"Participante '{identificador}' removido."
                         st.rerun()
         else:
             st.caption("Nenhum participante cadastrado ainda.")

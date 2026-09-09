@@ -117,11 +117,36 @@ def adicionar_ou_atualizar(usuario: str, email: str, senha: str | None, estudos_
     salvar_participantes(participantes)
 
 
-def remover(usuario: str):
-    chave = (usuario or "").strip().lower()
-    participantes = [
-        p for p in carregar_participantes()
-        if p.get("usuario", "").strip().lower() != chave
-    ]
+def remover(identificador: str):
+    """
+    Remove um participante. Aceita tanto o campo atual ("usuario") quanto os
+    campos do formato ANTIGO ("nome"/"codigo") — necessário pra conseguir
+    apagar registros legados criados antes dessa mudança de esquema, que não
+    têm "usuario" e travariam a limpeza se só comparássemos por ele.
+    """
+    chave = (identificador or "").strip().lower()
+
+    def bate(p: dict) -> bool:
+        for campo in ("usuario", "nome", "codigo"):
+            valor = p.get(campo)
+            if valor and str(valor).strip().lower() == chave:
+                return True
+        return False
+
+    participantes = [p for p in carregar_participantes() if not bate(p)]
     salvar_participantes(participantes)
+
+
+def remover_por_indice(indice: int):
+    """
+    Remove o participante pela POSIÇÃO na lista (mesma ordem devolvida por
+    carregar_participantes()), em vez de pelo nome/usuário. Usado pra
+    registros LEGADOS (sem campo "usuario") — remover por nome poderia
+    apagar também um registro novo diferente que, por coincidência, tenha
+    o mesmo nome de exibição do legado.
+    """
+    participantes = carregar_participantes()
+    if 0 <= indice < len(participantes):
+        participantes.pop(indice)
+        salvar_participantes(participantes)
 
