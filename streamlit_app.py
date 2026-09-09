@@ -202,12 +202,17 @@ def pagina_gestao():
             if not nome_p or not codigo_p:
                 st.error("Preencha nome e código de acesso.")
             else:
-                permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
-                pm.adicionar_ou_atualizar(nome_p, codigo_p, permitidos)
+                with st.status(f"Salvando participante '{nome_p}'...", expanded=True) as status_p:
+                    permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
+                    st.write("Gravando participantes.json no Drive...")
+                    pm.adicionar_ou_atualizar(nome_p, codigo_p, permitidos)
+                    status_p.update(label=f"✅ Participante '{nome_p}' salvo!", state="complete")
                 st.session_state["msg_sucesso"] = f"Participante '{nome_p}' salvo."
                 st.rerun()
 
-        participantes = pm.carregar_participantes()
+        with st.spinner("Carregando participantes..."):
+            participantes = pm.carregar_participantes()
+
         if participantes:
             st.write("**Participantes cadastrados:**")
             for p in participantes:
@@ -218,7 +223,9 @@ def pagina_gestao():
                     st.write(f"- **{p['nome']}** (código: `{p['codigo']}`) → {acesso_txt}")
                 with col_botao:
                     if st.button("Remover", key=f"remover_participante_{p['codigo']}"):
-                        pm.remover(p["codigo"])
+                        with st.status(f"Removendo '{p['nome']}'...", expanded=True) as status_r:
+                            pm.remover(p["codigo"])
+                            status_r.update(label=f"✅ '{p['nome']}' removido!", state="complete")
                         st.session_state["msg_sucesso"] = f"Participante '{p['nome']}' removido."
                         st.rerun()
         else:
