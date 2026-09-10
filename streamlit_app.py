@@ -115,22 +115,11 @@ def _aplicar_estilo_visual():
         box-shadow: 0 4px 16px rgba(128, 128, 128, 0.28);
     }
 
-    /* barra de progresso com gradiente em vez de cor sólida */
+    /* barra de progresso com gradiente em vez de cor sólida (usada em
+       outros lugares do app, ex: geração de simulado) */
     div[data-testid="stProgress"] > div > div > div {
         background-image: linear-gradient(90deg, #6C5CE7, #A29BFE);
         border-radius: 8px;
-    }
-
-    /* fixa a barra de progresso no topo enquanto rola a tela pras questões.
-       "background-color: inherit" pega a cor de fundo do tema ATIVO (claro
-       ou escuro) automaticamente, sem precisar saber qual está em uso. */
-    .st-key-barra_progresso_sticky {
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        background-color: inherit;
-        padding: 0.6rem 0 0.4rem 0;
-        box-shadow: 0 4px 10px rgba(128, 128, 128, 0.18);
     }
     </style>
     """, unsafe_allow_html=True)
@@ -287,35 +276,26 @@ def pagina_responder():
 
     st.divider()
 
-    # --- Progresso ao vivo, fixo no topo enquanto rola a tela (position:
-    # sticky via st.container(key=...), técnica atual suportada oficialmente
-    # pelo Streamlit — cada key vira uma classe CSS própria .st-key-<key>) ---
-    prefixo_resp = f"resp_{folder_id}_{numero_simulacao}"
-    respondidas = sum(
-        1 for i in range(len(questoes))
-        if st.session_state.get(f"{prefixo_resp}_{i}") is not None
-    )
-    with st.container(key="barra_progresso_sticky"):
-        st.progress(
-            respondidas / len(questoes) if questoes else 0,
-            text=f"{respondidas} de {len(questoes)} questões respondidas",
-        )
-
-    for i, q in enumerate(questoes):
-        st.markdown(f"**{i + 1}. {q['pergunta']}**")
-        opcoes_exibidas = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
-        st.radio(
-            f"resposta_{i}", opcoes_exibidas, key=f"{prefixo_resp}_{i}",
-            label_visibility="collapsed", index=None,
-        )
-
-    enviar = st.button("Enviar respostas", type="primary")
+    # Formulário de verdade: os widgets só disparam recálculo quando o botão
+    # de envio é clicado, em vez de reprocessar tudo a cada resposta marcada
+    # (mais econômico em chamadas/recursos, abriu mão do progresso ao vivo
+    # de propósito por causa disso).
+    with st.form("form_respostas"):
+        for i, q in enumerate(questoes):
+            st.markdown(f"**{i + 1}. {q['pergunta']}**")
+            opcoes_exibidas = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
+            st.radio(
+                f"resposta_{i}", opcoes_exibidas, key=f"resp_{i}",
+                label_visibility="collapsed", index=None,
+            )
+        st.write("")
+        enviar = st.form_submit_button("Enviar respostas", type="primary")
 
     if enviar:
         respostas_usuario = {}
         for i, q in enumerate(questoes):
             opcoes_exibidas_i = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
-            valor_selecionado = st.session_state.get(f"{prefixo_resp}_{i}")
+            valor_selecionado = st.session_state.get(f"resp_{i}")
             respostas_usuario[i] = opcoes_exibidas_i.index(valor_selecionado) if valor_selecionado else None
 
         nao_respondidas = [i + 1 for i, v in respostas_usuario.items() if v is None]
