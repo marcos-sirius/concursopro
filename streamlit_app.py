@@ -518,19 +518,22 @@ def pagina_gestao():
     escolha = st.selectbox("Estudo", opcoes, index=indice_padrao)
 
     if escolha == "➕ Novo estudo":
+        # A escolha de categoria fica FORA do st.form de propósito: campos
+        # dentro de um form não reagem uns aos outros até o envio, então a
+        # caixa de texto "nova categoria" nunca apareceria de verdade se
+        # estivesse lá dentro (bug corrigido).
+        opcoes_categoria = categorias_existentes + ["➕ Nova categoria..."]
+        categoria_escolhida_form = st.selectbox("Categoria", opcoes_categoria, key="nova_categoria_estudo_select")
+        nova_categoria_texto = ""
+        if categoria_escolhida_form == "➕ Nova categoria...":
+            nova_categoria_texto = st.text_input(
+                "Nome da nova categoria (ex: Contador, Psicóloga)", key="nova_categoria_estudo_texto"
+            )
+
         with st.form("form_novo_estudo"):
             nome_estudo = st.text_input("Nome do estudo/concurso")
             banca = st.text_input("Banca examinadora")
             nivel = st.text_input("Nível (ex: Superior)")
-
-            opcoes_categoria = categorias_existentes + ["➕ Nova categoria..."]
-            categoria_escolhida_form = st.selectbox("Categoria", opcoes_categoria)
-            nova_categoria_texto = ""
-            if categoria_escolhida_form == "➕ Nova categoria...":
-                nova_categoria_texto = st.text_input(
-                    "Nome da nova categoria (ex: Contador, Psicóloga)"
-                )
-
             arquivo_excel = st.file_uploader("Excel de conteúdo programático (.xlsx)", type=["xlsx"])
             enviar = st.form_submit_button("Criar estudo")
 
