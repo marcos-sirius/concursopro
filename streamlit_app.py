@@ -56,6 +56,71 @@ import sorteio
 
 st.set_page_config(page_title="Simulador EARA", page_icon="📚", layout="centered")
 
+
+def _aplicar_estilo_visual():
+    """
+    Injeta CSS customizado pra deixar o app mais vivo: fonte diferente,
+    fade-in suave no conteúdo, botões com hover animado, cards com sombra
+    pras questões, e uma barra de progresso com gradiente.
+
+    IMPORTANTE: isso usa classes internas do Streamlit (não documentadas
+    oficialmente), então pode parar de funcionar se uma atualização futura
+    do Streamlit mudar essa estrutura interna. Não quebra o app — na pior
+    hipótese, o CSS simplesmente deixa de ter efeito e volta ao visual padrão.
+    """
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Poppins', sans-serif;
+    }
+
+    /* fade-in suave em cada bloco de conteúdo renderizado */
+    div[data-testid="stVerticalBlock"] > div {
+        animation: apareceSuave 0.45s ease-out;
+    }
+    @keyframes apareceSuave {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* botões com leve efeito de escala e sombra ao passar o mouse */
+    .stButton > button, .stFormSubmitButton > button {
+        border-radius: 10px;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .stButton > button:hover, .stFormSubmitButton > button:hover {
+        transform: translateY(-2px) scale(1.02);
+        box-shadow: 0 6px 16px rgba(108, 92, 231, 0.25);
+    }
+
+    /* cards com sombra suave para separar visualmente as questões */
+    div[data-testid="stExpander"] {
+        border-radius: 14px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+        transition: box-shadow 0.2s ease;
+    }
+    div[data-testid="stExpander"]:hover {
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10);
+    }
+
+    /* barra de progresso com gradiente em vez de cor sólida */
+    div[data-testid="stProgress"] > div > div > div {
+        background-image: linear-gradient(90deg, #6C5CE7, #A29BFE);
+        border-radius: 8px;
+    }
+
+    /* transição suave ao trocar de página na barra lateral */
+    section[data-testid="stSidebar"] {
+        transition: background-color 0.3s ease;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+_aplicar_estilo_visual()
+
 LETRAS = ["A", "B", "C", "D", "E"]
 
 PAGINAS = ["Responder simulado", "Gestão de estudos", "Desempenho"]
@@ -224,7 +289,14 @@ def pagina_responder():
             )
 
         acertos, total = resultado["acertos"], resultado["total"]
-        st.success(f"✅ Respostas enviadas! Você acertou {acertos}/{total} ({acertos/total:.0%}).")
+        percentual = acertos / total if total else 0
+        st.success(f"✅ Respostas enviadas! Você acertou {acertos}/{total} ({percentual:.0%}).")
+
+        # celebração visual, variando com o desempenho
+        if percentual >= 0.8:
+            st.balloons()
+        elif percentual >= 0.5:
+            st.snow()
 
         with st.expander("Ver gabarito comentado", expanded=True):
             for i, r in enumerate(respostas_completas):
