@@ -123,16 +123,32 @@ def _aplicar_estilo_visual():
     }
 
     /* fixa a barra de botões (Salvar progresso / Enviar respostas) no
-       rodapé enquanto rola a tela pelas questões — só posicionamento
-       visual (CSS puro), não afeta quando o app reprocessa nada.
-       "background-color: inherit" acompanha o tema ativo automaticamente. */
+       rodapé, sempre visível independente da rolagem. Trocamos de
+       "position: sticky" pra "position: fixed" porque sticky com
+       "bottom" costuma falhar dentro de containers flexíveis (é como o
+       Streamlit organiza os blocos por baixo dos panos) — fixed gruda na
+       tela de verdade, sem depender dessa estrutura interna.
+       O wrapper interno limita a largura pra imitar o layout "centered"
+       do Streamlit (senão a barra ocuparia a tela toda, largura cheia). */
     .st-key-botoes_envio_fixos {
-        position: sticky;
+        position: fixed;
+        left: 0;
+        right: 0;
         bottom: 0;
         z-index: 999;
         background-color: inherit;
-        padding: 0.6rem 0;
         box-shadow: 0 -4px 10px rgba(128, 128, 128, 0.18);
+    }
+    .st-key-botoes_envio_fixos > div {
+        max-width: 730px;
+        margin: 0 auto;
+        padding: 0.6rem 1rem;
+    }
+
+    /* dá espaço no final da página pra barra fixa não tampar a última
+       questão/pergunta */
+    div[data-testid="stMainBlockContainer"] {
+        padding-bottom: 5rem;
     }
     </style>
     """, unsafe_allow_html=True)
