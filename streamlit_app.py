@@ -162,6 +162,21 @@ def _erro_drive_amigavel(e: Exception):
         st.code(str(e))
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _resumo_estudos_cacheado():
+    """
+    Lê a lista de estudos + o config.json de cada um (pra saber a categoria)
+    e guarda em cache por 30s. Sem isso, a tela de Responder simulado re-
+    executaria essa leitura a CADA clique de resposta (o progresso ao vivo
+    reroda a função inteira a cada widget marcado) — desperdiçando chamadas
+    ao Drive sem necessidade. 30s é curto o bastante pra um estudo/categoria
+    novo aparecer quase na hora, mas evita reler em toda interação.
+    """
+    estudos = emd.listar_estudos()
+    resumo = emd.carregar_resumo_estudos(estudos)
+    return estudos, resumo
+
+
 # =========================================================================
 # PÁGINA 1 — RESPONDER SIMULADO (usuário + senha do participante)
 # =========================================================================
@@ -196,24 +211,28 @@ def pagina_responder():
             del st.session_state["participante"]
             st.rerun()
 
-    # --- Filtra estudos pelo que esse participante pode acessar ---
+    # --- Cascata: categoria -> estudo, filtrando pelo que o participante pode acessar ---
     try:
-        todos_estudos = emd.listar_estudos()
+        _, resumo_estudos = _resumo_estudos_cacheado()
     except Exception as e:
         _erro_drive_amigavel(e)
         return
 
-    estudos_permitidos = [
-        (nome, folder_id) for nome, folder_id in todos_estudos
-        if pm.pode_acessar(participante, nome)
+    resumo_permitido = [
+        r for r in resumo_estudos
+        if pm.pode_acessar(participante, r["nome"], r["categoria"])
     ]
 
-    if not estudos_permitidos:
+    if not resumo_permitido:
         st.info("Você ainda não tem acesso a nenhum estudo. Fale com quem te cadastrou.")
         return
 
-    nome_estudo = st.selectbox("Estudo", [n for n, _ in estudos_permitidos])
-    folder_id = dict(estudos_permitidos)[nome_estudo]
+    categorias_disponiveis = sorted({r["categoria"] for r in resumo_permitido})
+    categoria_escolhida = st.selectbox("Categoria", categorias_disponiveis)
+
+    estudos_da_categoria = [r for r in resumo_permitido if r["categoria"] == categoria_escolhida]
+    nome_estudo = st.selectbox("Estudo", [r["nome"] for r in estudos_da_categoria])
+    folder_id = next(r["folder_id"] for r in estudos_da_categoria if r["nome"] == nome_estudo)
 
     with st.spinner("Carregando simulados disponíveis..."):
         wb = ds.baixar_workbook(folder_id)
@@ -355,11 +374,12 @@ def pagina_gestao():
         st.success(st.session_state.pop("msg_sucesso"))
 
     try:
-        estudos = emd.listar_estudos()
+        estudos, resumo_estudos = _resumo_estudos_cacheado()
     except Exception as e:
         _erro_drive_amigavel(e)
         return
     nomes_estudos = [n for n, _ in estudos]
+    categorias_existentes = emd.listar_categorias(resumo_estudos)
 
     with st.spinner("Carregando participantes..."):
         try:
@@ -369,8 +389,7 @@ def pagina_gestao():
             return
 
     # --- Resumo rápido no topo ---
-    with st.spinner("Calculando resumo..."):
-        total_simulados = emd.contar_simulados_totais(estudos)
+    total_simulados = emd.contar_simulados_totais(resumo_estudos)
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Estudos", len(estudos))
     col_b.metric("Participantes", len(participantes))
@@ -380,8 +399,8 @@ def pagina_gestao():
         st.caption(
             "Cada participante recebe login próprio (usuário + senha, não é "
             "a senha de admin) e só enxerga, na tela \"Responder simulado\", "
-            "os estudos que você liberar aqui pra ele. Usuário não diferencia "
-            "maiúsculas de minúsculas (Ana = ana = ANA)."
+            "os estudos/categorias que você liberar aqui pra ele. Usuário não "
+            "diferencia maiúsculas de minúsculas (Ana = ana = ANA)."
         )
 
         # --- Seletor de edição: escolher um participante existente pré-carrega
@@ -399,6 +418,22 @@ def pagina_gestao():
 
         permitidos_atuais = dados_padrao.get("estudos_permitidos", [])
 
+        # --- Opções do multiselect: categorias inteiras + estudos individuais,
+        # com rótulos visuais diferentes pra distinguir um do outro. Convertemos
+        # ida e volta entre o rótulo exibido e o valor gravado (categoria:X / slug). ---
+        rotulo_por_valor = {pm.marcador_categoria(c): f"📁 {c} (categoria inteira)" for c in categorias_existentes}
+        rotulo_por_valor.update({n: f"📄 {n}" for n in nomes_estudos})
+        valor_por_rotulo = {v: k for k, v in rotulo_por_valor.items()}
+
+        opcoes_multiselect = (
+            [f"📁 {c} (categoria inteira)" for c in categorias_existentes]
+            + [f"📄 {n}" for n in nomes_estudos]
+        )
+        default_multiselect = [
+            rotulo_por_valor[v] for v in permitidos_atuais
+            if v != pm.TODOS and v in rotulo_por_valor
+        ]
+
         with st.form("form_participante"):
             usuario_p = st.text_input("Usuário", value=dados_padrao.get("usuario", ""))
             email_p = st.text_input("E-mail", value=dados_padrao.get("email", ""))
@@ -411,10 +446,13 @@ def pagina_gestao():
                 "Acesso a TODOS os estudos (atuais e futuros)",
                 value=(pm.TODOS in permitidos_atuais),
             )
-            estudos_selecionados = st.multiselect(
-                "Estudos permitidos", nomes_estudos,
-                default=[e for e in permitidos_atuais if e != pm.TODOS],
+            selecao_multiselect = st.multiselect(
+                "Categorias inteiras e/ou estudos individuais permitidos",
+                opcoes_multiselect,
+                default=default_multiselect,
                 disabled=acesso_total,
+                help="Marcar uma categoria libera automaticamente todos os estudos "
+                     "dela, inclusive os que forem criados depois.",
             )
             salvar_p = st.form_submit_button("Salvar participante")
 
@@ -424,7 +462,10 @@ def pagina_gestao():
             else:
                 with st.status(f"Salvando participante '{usuario_p}'...", expanded=True) as status_p:
                     try:
-                        permitidos = [pm.TODOS] if acesso_total else estudos_selecionados
+                        if acesso_total:
+                            permitidos = [pm.TODOS]
+                        else:
+                            permitidos = [valor_por_rotulo[r] for r in selecao_multiselect]
                         st.write("Gravando participantes.json no Drive...")
                         pm.adicionar_ou_atualizar(usuario_p, email_p, senha_p or None, permitidos)
                         status_p.update(label=f"✅ Participante '{usuario_p}' salvo!", state="complete")
@@ -481,12 +522,26 @@ def pagina_gestao():
             nome_estudo = st.text_input("Nome do estudo/concurso")
             banca = st.text_input("Banca examinadora")
             nivel = st.text_input("Nível (ex: Superior)")
+
+            opcoes_categoria = categorias_existentes + ["➕ Nova categoria..."]
+            categoria_escolhida_form = st.selectbox("Categoria", opcoes_categoria)
+            nova_categoria_texto = ""
+            if categoria_escolhida_form == "➕ Nova categoria...":
+                nova_categoria_texto = st.text_input(
+                    "Nome da nova categoria (ex: Contador, Psicóloga)"
+                )
+
             arquivo_excel = st.file_uploader("Excel de conteúdo programático (.xlsx)", type=["xlsx"])
             enviar = st.form_submit_button("Criar estudo")
 
         if enviar:
-            if not (nome_estudo and banca and nivel and arquivo_excel):
-                st.error("Preencha todos os campos e envie o Excel de conteúdo programático.")
+            categoria_final = (
+                nova_categoria_texto.strip()
+                if categoria_escolhida_form == "➕ Nova categoria..."
+                else categoria_escolhida_form
+            )
+            if not (nome_estudo and banca and nivel and arquivo_excel and categoria_final):
+                st.error("Preencha todos os campos (inclusive a categoria) e envie o Excel de conteúdo programático.")
                 return
             try:
                 eixos = cl.carregar_conteudo_programatico(arquivo_excel)
@@ -495,7 +550,7 @@ def pagina_gestao():
                 return
 
             try:
-                config, folder_id = emd.criar_estudo(nome_estudo, banca, nivel, eixos)
+                config, folder_id = emd.criar_estudo(nome_estudo, banca, nivel, eixos, categoria_final)
             except ValueError as e:
                 st.error(str(e))
                 return
@@ -503,6 +558,7 @@ def pagina_gestao():
                 _erro_drive_amigavel(e)
                 return
 
+            _resumo_estudos_cacheado.clear()
             st.session_state["estudo_folder_id"] = folder_id
             st.session_state["estudo_config"] = config
             st.session_state["msg_sucesso"] = f"Estudo '{nome_estudo}' criado com sucesso! ✅"
@@ -522,9 +578,35 @@ def pagina_gestao():
 
     st.subheader(config["nome_estudo"])
     st.caption(
+        f"Categoria: {config.get('categoria', emd.CATEGORIA_PADRAO)} · "
         f"Banca: {config['banca']} · Nível: {config['nivel']} · "
         f"Simulações já geradas: {config['simulacao_atual']}"
     )
+
+    with st.expander("🏷️ Trocar categoria deste estudo"):
+        opcoes_categoria_edicao = categorias_existentes + ["➕ Nova categoria..."]
+        categoria_atual = config.get("categoria", emd.CATEGORIA_PADRAO)
+        indice_atual = (
+            opcoes_categoria_edicao.index(categoria_atual)
+            if categoria_atual in opcoes_categoria_edicao else 0
+        )
+        nova_escolha = st.selectbox("Categoria", opcoes_categoria_edicao, index=indice_atual, key="editar_categoria_select")
+        nova_categoria_texto_edicao = ""
+        if nova_escolha == "➕ Nova categoria...":
+            nova_categoria_texto_edicao = st.text_input("Nome da nova categoria", key="editar_categoria_novo_texto")
+
+        if st.button("Salvar categoria"):
+            categoria_final_edicao = (
+                nova_categoria_texto_edicao.strip() if nova_escolha == "➕ Nova categoria..." else nova_escolha
+            )
+            if not categoria_final_edicao:
+                st.error("Informe o nome da categoria.")
+            else:
+                config = emd.atualizar_categoria(folder_id, config, categoria_final_edicao)
+                st.session_state["estudo_config"] = config
+                _resumo_estudos_cacheado.clear()
+                st.session_state["msg_sucesso"] = f"Categoria atualizada para '{categoria_final_edicao}'."
+                st.rerun()
 
     with st.expander("🔄 Ressincronizar eixos/temas a partir de um novo Excel"):
         novo_arquivo = st.file_uploader("Excel atualizado", type=["xlsx"], key="resync_uploader")
@@ -550,6 +632,7 @@ def pagina_gestao():
             with st.status(f"Movendo '{config['nome_estudo']}' para a lixeira...", expanded=True) as status_del:
                 try:
                     emd.excluir_estudo(folder_id)
+                    _resumo_estudos_cacheado.clear()
                     status_del.update(label="✅ Estudo excluído!", state="complete")
                 except Exception as e:
                     status_del.update(label="❌ Erro ao excluir.", state="error")

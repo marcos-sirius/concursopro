@@ -34,6 +34,16 @@ import drive_storage as ds
 
 NOME_ARQUIVO = "participantes.json"
 TODOS = "*"
+PREFIXO_CATEGORIA = "categoria:"
+
+
+def marcador_categoria(nome_categoria: str) -> str:
+    """
+    Valor gravado em estudos_permitidos pra representar "toda uma categoria
+    de estudos, atual e futura" — em vez de listar cada estudo individual
+    daquela categoria um por um.
+    """
+    return f"{PREFIXO_CATEGORIA}{nome_categoria}"
 
 
 def _hash_senha(senha: str) -> str:
@@ -76,9 +86,18 @@ def autenticar(usuario: str, senha: str) -> dict | None:
     return None
 
 
-def pode_acessar(participante: dict, slug_estudo: str) -> bool:
+def pode_acessar(participante: dict, slug_estudo: str, categoria_estudo: str | None = None) -> bool:
+    """
+    Acesso concedido se o participante tiver: "*" (tudo), o slug do estudo
+    específico, OU um marcador de categoria que bata com a categoria desse
+    estudo (concede a categoria inteira, incluindo estudos criados depois).
+    """
     permitidos = participante.get("estudos_permitidos", [])
-    return TODOS in permitidos or slug_estudo in permitidos
+    if TODOS in permitidos or slug_estudo in permitidos:
+        return True
+    if categoria_estudo and marcador_categoria(categoria_estudo) in permitidos:
+        return True
+    return False
 
 
 def adicionar_ou_atualizar(usuario: str, email: str, senha: str | None, estudos_permitidos: list):

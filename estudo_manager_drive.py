@@ -12,7 +12,10 @@ def listar_estudos() -> list:
     return [(f["name"], f["id"]) for f in ds.listar_estudos()]
 
 
-def criar_estudo(nome_estudo: str, banca: str, nivel: str, eixos: dict) -> tuple:
+CATEGORIA_PADRAO = "Geral"  # usada quando um estudo antigo não tem categoria definida
+
+
+def criar_estudo(nome_estudo: str, banca: str, nivel: str, eixos: dict, categoria: str = CATEGORIA_PADRAO) -> tuple:
     """
     Cria um estudo novo. IMPORTANTE: se o nome escolhido gerar o mesmo "slug"
     de um estudo que já existe (ex: "DATAPREV 2026" e "DATAPREV - 2026" viram
@@ -36,6 +39,7 @@ def criar_estudo(nome_estudo: str, banca: str, nivel: str, eixos: dict) -> tuple
         "slug": slug,
         "banca": banca,
         "nivel": nivel,
+        "categoria": (categoria or CATEGORIA_PADRAO).strip() or CATEGORIA_PADRAO,
         "eixos": eixos,
         "historico_temas": {e: [] for e in eixos},
         "simulacao_atual": 0,
@@ -63,18 +67,44 @@ def excluir_estudo(folder_id: str):
     ds.mover_para_lixeira(folder_id)
 
 
-def contar_simulados_totais(estudos: list) -> int:
+def atualizar_categoria(folder_id: str, config: dict, nova_categoria: str) -> dict:
+    """Renomeia a categoria de um estudo já existente."""
+    config["categoria"] = (nova_categoria or CATEGORIA_PADRAO).strip() or CATEGORIA_PADRAO
+    ds.salvar_config(folder_id, config)
+    return config
+
+
+def carregar_resumo_estudos(estudos: list) -> list:
     """
-    Soma 'simulacao_atual' de todos os estudos — usado só pro resumo no topo
-    da tela de Gestão. Faz 1 leitura de config.json por estudo; em troca de
-    um resumo mais completo, aceita esse custo extra (baixo, dado que o uso
-    é pessoal/pequeno grupo, não uma escala grande de estudos).
+    Lê o config.json de CADA estudo uma única vez e devolve um resumo:
+    [{"nome", "folder_id", "categoria", "simulacao_atual"}, ...]
+
+    Consolidado num só lugar pra evitar ler o mesmo config.json várias vezes
+    em pontos diferentes da tela (resumo no topo da Gestão, populando a lista
+    de categorias, e a cascata categoria->estudo em Responder simulado).
+    Quem CHAMA esta função deve cachear o resultado (ver streamlit_app.py) —
+    ela mesma não cacheia, porque não depende do Streamlit.
     """
-    total = 0
-    for _, folder_id in estudos:
+    resumo = []
+    for nome, folder_id in estudos:
         try:
             config = ds.ler_config(folder_id)
-            total += config.get("simulacao_atual", 0)
         except FileNotFoundError:
             continue
-    return total
+        resumo.append({
+            "nome": nome,
+            "folder_id": folder_id,
+            "categoria": config.get("categoria") or CATEGORIA_PADRAO,
+            "simulacao_atual": config.get("simulacao_atual", 0),
+        })
+    return resumo
+
+
+def contar_simulados_totais(resumo_estudos: list) -> int:
+    """Soma 'simulacao_atual' a partir de um resumo já carregado (ver carregar_resumo_estudos)."""
+    return sum(r["simulacao_atual"] for r in resumo_estudos)
+
+
+def listar_categorias(resumo_estudos: list) -> list:
+    """Categorias distintas em uso, ordenadas alfabeticamente."""
+    return sorted({r["categoria"] for r in resumo_estudos})
