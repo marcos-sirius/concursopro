@@ -57,105 +57,89 @@ import sorteio
 st.set_page_config(page_title="Simulador EARA", page_icon="📚", layout="centered")
 
 
-def _aplicar_estilo_visual(modo_escuro: bool):
+def _aplicar_estilo_visual():
     """
-    Injeta CSS customizado pra deixar o app mais vivo: fonte diferente,
-    fade-in suave no conteúdo, botões com hover animado, cards com sombra
-    pras questões, barra de progresso com gradiente — e agora também tema
-    claro/escuro, escolhido pela própria pessoa (não é fixo).
+    Injeta CSS puramente COSMÉTICO (fonte, animações, hover, sombra, barra de
+    progresso fixa) — sem tocar em cor de fundo/texto.
+
+    Por quê? Claro/escuro agora é resolvido pelo tema NATIVO do Streamlit
+    (.streamlit/config.toml com [theme.light] e [theme.dark]), escolhido pela
+    pessoa no menu "⋮" > Settings > Theme. O motor de tema de verdade do
+    Streamlit troca a cor de TODOS os componentes internos corretamente
+    (rótulo de rádio, legenda, cabeçalho etc.) — coisa que um CSS manual por
+    cima não conseguia cobrir por completo (foi isso que causou o texto
+    ilegível no modo escuro na primeira tentativa). Esse CSS aqui só cuida do
+    que é puramente visual e não depende de qual tema está ativo.
 
     IMPORTANTE: isso usa classes internas do Streamlit (não documentadas
     oficialmente), então pode parar de funcionar se uma atualização futura
     do Streamlit mudar essa estrutura interna. Não quebra o app — na pior
     hipótese, o CSS simplesmente deixa de ter efeito e volta ao visual padrão.
     """
-    if modo_escuro:
-        cor_fundo = "#1E1B2E"
-        cor_fundo_secundario = "#2A2640"
-        cor_texto = "#EDEBF7"
-        cor_sombra = "rgba(255, 255, 255, 0.08)"
-        cor_sombra_forte = "rgba(255, 255, 255, 0.14)"
-        cor_sombra_hover = "rgba(162, 155, 254, 0.35)"
-    else:
-        cor_fundo = "#FFFFFF"
-        cor_fundo_secundario = "#F5F3FF"
-        cor_texto = "#2D2A3E"
-        cor_sombra = "rgba(0, 0, 0, 0.06)"
-        cor_sombra_forte = "rgba(0, 0, 0, 0.10)"
-        cor_sombra_hover = "rgba(108, 92, 231, 0.25)"
-
-    st.markdown(f"""
+    st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
 
-    html, body, [class*="css"] {{
+    html, body, [class*="css"] {
         font-family: 'Poppins', sans-serif;
-    }}
-
-    /* tema claro/escuro escolhido pela pessoa */
-    .stApp {{
-        background-color: {cor_fundo};
-        color: {cor_texto};
-        transition: background-color 0.3s ease, color 0.3s ease;
-    }}
-    section[data-testid="stSidebar"] {{
-        background-color: {cor_fundo_secundario};
-        transition: background-color 0.3s ease;
-    }}
+    }
 
     /* fade-in suave em cada bloco de conteúdo renderizado */
-    div[data-testid="stVerticalBlock"] > div {{
+    div[data-testid="stVerticalBlock"] > div {
         animation: apareceSuave 0.45s ease-out;
-    }}
-    @keyframes apareceSuave {{
-        from {{ opacity: 0; transform: translateY(8px); }}
-        to   {{ opacity: 1; transform: translateY(0); }}
-    }}
+    }
+    @keyframes apareceSuave {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
 
     /* botões com leve efeito de escala e sombra ao passar o mouse */
-    .stButton > button, .stFormSubmitButton > button {{
+    .stButton > button, .stFormSubmitButton > button {
         border-radius: 10px;
         transition: transform 0.15s ease, box-shadow 0.15s ease;
-    }}
-    .stButton > button:hover, .stFormSubmitButton > button:hover {{
+    }
+    .stButton > button:hover, .stFormSubmitButton > button:hover {
         transform: translateY(-2px) scale(1.02);
-        box-shadow: 0 6px 16px {cor_sombra_hover};
-    }}
+        box-shadow: 0 6px 16px rgba(108, 92, 231, 0.35);
+    }
 
-    /* cards com sombra suave para separar visualmente as questões */
-    div[data-testid="stExpander"] {{
+    /* cards com sombra suave para separar visualmente as questões — sombra
+       neutra e discreta, funciona tanto no tema claro quanto no escuro */
+    div[data-testid="stExpander"] {
         border-radius: 14px;
-        box-shadow: 0 2px 10px {cor_sombra};
+        box-shadow: 0 2px 10px rgba(128, 128, 128, 0.18);
         transition: box-shadow 0.2s ease;
-    }}
-    div[data-testid="stExpander"]:hover {{
-        box-shadow: 0 4px 16px {cor_sombra_forte};
-    }}
+    }
+    div[data-testid="stExpander"]:hover {
+        box-shadow: 0 4px 16px rgba(128, 128, 128, 0.28);
+    }
 
     /* barra de progresso com gradiente em vez de cor sólida */
-    div[data-testid="stProgress"] > div > div > div {{
+    div[data-testid="stProgress"] > div > div > div {
         background-image: linear-gradient(90deg, #6C5CE7, #A29BFE);
         border-radius: 8px;
-    }}
+    }
 
-    /* fixa a barra de progresso no topo enquanto rola a tela pras questões */
-    .st-key-barra_progresso_sticky {{
+    /* fixa a barra de progresso no topo enquanto rola a tela pras questões.
+       "background-color: inherit" pega a cor de fundo do tema ATIVO (claro
+       ou escuro) automaticamente, sem precisar saber qual está em uso. */
+    .st-key-barra_progresso_sticky {
         position: sticky;
         top: 0;
         z-index: 999;
-        background-color: {cor_fundo};
+        background-color: inherit;
         padding: 0.6rem 0 0.4rem 0;
-        box-shadow: 0 4px 10px {cor_sombra};
-    }}
+        box-shadow: 0 4px 10px rgba(128, 128, 128, 0.18);
+    }
     </style>
     """, unsafe_allow_html=True)
 
 
 LETRAS = ["A", "B", "C", "D", "E"]
 
-modo_escuro = st.sidebar.toggle("🌙 Modo escuro", value=False)
-_aplicar_estilo_visual(modo_escuro)
+_aplicar_estilo_visual()
 
+st.sidebar.caption("💡 Para trocar entre claro/escuro: menu \"⋮\" (canto superior direito) → Settings → Theme.")
 st.sidebar.divider()
 PAGINAS = ["Responder simulado", "Gestão de estudos", "Desempenho"]
 pagina = st.sidebar.radio("Navegação", PAGINAS)
