@@ -50,7 +50,9 @@ import drive_storage as ds
 import estudo_manager_drive as emd
 import excel_manager as em
 import ia_gerador as ia
+import banco_compartilhado_manager as bcm
 import categorias_manager as cat
+import geracao_manager as gm
 import participantes_manager as pm
 import resultados_manager as rm
 import sorteio
@@ -179,6 +181,165 @@ def _erro_drive_amigavel(e: Exception):
     )
     with st.expander("Detalhes técnicos do erro"):
         st.code(str(e))
+
+
+def _passo_geracao(folder_id: str, config: dict, wb, ck: dict) -> str:
+    """
+    Processa UMA unidade de trabalho e devolve "continuar", "concluido",
+    "cancelado" ou "erro". Salva o checkpoint no Drive a cada passo: se a
+    aba for fechada, der erro, ou você clicar em Cancelar, nada além do
+    passo atual se perde.
+
+    Antes de gerar um tema novo, verifica se dá pra REAPROVEITAR questões
+    de um tema parecido de outro estudo (mesmo nível, dentro da janela de
+    meses configurada) — só chama a API pro que sobrar depois do
+    reaproveitamento (se houver).
+    """
+    chave_cancelar = f"geracao_cancelar_{folder_id}"
+    meses_janela = ck.get("meses_janela_reuso", 6)
+
+    for eixo, dados_eixo in config["eixos"].items():
+        eixo_ck = ck["eixos"].get(eixo)
+
+        if eixo_ck is None:
+            # decide a distribuição desse eixo uma única vez (mexe no
+            # historico_temas do config, por isso salva junto)
+            distribuicao = sorteio.distribuir_temas(config, eixo, dados_eixo["qtd_questoes"])
+            ck["eixos"][eixo] = {"distribuicao": distribuicao, "prontos": {}, "origem": {}}
+            emd.salvar_config(folder_id, config)
+            gm.salvar_checkpoint(folder_id, ck)
+            return "continuar"
+
+        pendentes = [t for t in eixo_ck["distribuicao"] if t not in eixo_ck["prontos"]]
+        if not pendentes:
+            continue  # este eixo já está pronto, passa pro próximo
+
+        if st.session_state.get(chave_cancelar):
+            ck["status"] = "cancelado"
+            gm.salvar_checkpoint(folder_id, ck)
+            st.session_state.pop(chave_cancelar, None)
+            return "cancelado"
+
+        tema = pendentes[0]
+        qtd_tema = eixo_ck["distribuicao"][tema]
+
+        # --- Passo A: decide (uma vez só) se existe tema parecido em outro
+        # estudo pra reaproveitar. Fica salvo no checkpoint pra não perguntar
+        # de novo se a geração for retomada depois. ---
+        decisoes = eixo_ck.setdefault("decisoes_reuso", {})
+        if tema not in decisoes:
+            candidatos = bcm.buscar_candidatos(
+                nivel=config["nivel"], eixo=eixo, meses_janela=meses_janela,
+                excluir_estudo_folder_id=folder_id,
+            )
+            indice_match = None
+            if candidatos:
+                try:
+                    indice_match = ia.comparar_temas_similares(tema, [c["tema"] for c in candidatos])
+                except Exception:
+                    indice_match = None  # falha na comparação não deve travar a geração inteira
+            decisoes[tema] = candidatos[indice_match] if indice_match is not None else None
+            gm.salvar_checkpoint(folder_id, ck)
+            return "continuar"
+
+        candidato = decisoes[tema]
+        questoes_reaproveitadas = []
+        if candidato:
+            wb_doador = wb if candidato["estudo_folder_id"] == folder_id else ds.baixar_workbook(candidato["estudo_folder_id"])
+            disponiveis = em.questoes_por_tema(wb_doador, candidato["eixo"], candidato["tema"])
+            questoes_reaproveitadas = disponiveis[:qtd_tema]
+
+        # --- Passo B: se o reaproveitamento já cobre tudo, nem chama a API ---
+        if len(questoes_reaproveitadas) >= qtd_tema:
+            eixo_ck["prontos"][tema] = questoes_reaproveitadas[:qtd_tema]
+            eixo_ck["origem"][tema] = {
+                "tipo": "reaproveitado", "estudo": candidato["estudo_nome"], "tema_origem": candidato["tema"],
+            }
+            bcm.incrementar_uso(candidato["id"])
+            gm.salvar_checkpoint(folder_id, ck)
+            return "continuar"
+
+        # --- Passo C: gera só o que falta (0 se não achou nada reaproveitável) ---
+        qtd_faltante = qtd_tema - len(questoes_reaproveitadas)
+        evitar = em.perguntas_ja_usadas(wb, eixo, tema=tema, limite=30)
+
+        try:
+            questoes_novas = ia.gerar_bloco(
+                banca=config["banca"], nivel=config["nivel"], tema=tema,
+                qtd=qtd_faltante, evitar=evitar, tamanho_bloco=dados_eixo.get("tamanho_bloco", 10),
+            )
+        except Exception as e:
+            ck["status"] = "erro"
+            ck["erro_mensagem"] = str(e)
+            gm.salvar_checkpoint(folder_id, ck)
+            return "erro"
+
+        if not questoes_novas or len(questoes_novas) < qtd_faltante:
+            obtido = len(questoes_novas) if questoes_novas else 0
+            ck["status"] = "erro"
+            ck["erro_mensagem"] = (
+                f"Falha ao gerar o tema '{tema}' (obteve {obtido}/{qtd_faltante} questões "
+                f"mesmo após as retentativas internas — provável instabilidade da API)."
+            )
+            gm.salvar_checkpoint(folder_id, ck)
+            return "erro"
+
+        if questoes_reaproveitadas:
+            bcm.incrementar_uso(candidato["id"])
+            eixo_ck["origem"][tema] = {
+                "tipo": "parcial", "estudo": candidato["estudo_nome"], "tema_origem": candidato["tema"],
+                "qtd_reaproveitada": len(questoes_reaproveitadas),
+            }
+        else:
+            eixo_ck["origem"][tema] = {"tipo": "gerado"}
+            # este lote é 100% novo -> vira candidato pra outros estudos reaproveitarem no futuro
+            bcm.registrar_novo_lote(
+                folder_id, config.get("nome_estudo", ""), config["nivel"], eixo, tema, len(questoes_novas),
+            )
+
+        eixo_ck["prontos"][tema] = questoes_reaproveitadas + questoes_novas
+        gm.salvar_checkpoint(folder_id, ck)
+        return "continuar"
+
+    # nenhum eixo com pendente -> monta tudo e finaliza de vez
+    eixos_questoes = {}
+    resumo_reaproveitamento = []
+    for eixo, eixo_ck in ck["eixos"].items():
+        blocos_eixo = [(tema, qs) for tema, qs in eixo_ck["prontos"].items() if qs]
+
+        # só reembaralha o gabarito das questões GERADAS agora — as
+        # reaproveitadas já têm o comentário com letra fixa da vez em que
+        # foram criadas; reembaralhar de novo bagunçaria essa referência,
+        # já que não sobrou nenhum marcador [[LETRA_OPCAO_N]] pra corrigir.
+        origem_por_tema = eixo_ck.get("origem", {})
+        questoes_para_embaralhar = [
+            q for tema, qs in blocos_eixo
+            for q in qs
+            if origem_por_tema.get(tema, {}).get("tipo") != "reaproveitado"
+        ]
+        if questoes_para_embaralhar:
+            ia.balancear_gabaritos(questoes_para_embaralhar)
+
+        em.resetar_guia_eixo(wb, eixo)
+        for tema, questoes in blocos_eixo:
+            em.gravar_questoes_no_eixo(wb, eixo, tema, questoes)
+            info_origem = origem_por_tema.get(tema, {})
+            if info_origem.get("tipo") in ("reaproveitado", "parcial"):
+                resumo_reaproveitamento.append(
+                    f"{eixo} / {tema} ← \"{info_origem['tema_origem']}\" ({info_origem['estudo']})"
+                )
+        if blocos_eixo:
+            eixos_questoes[eixo] = blocos_eixo
+
+    em.consolidar(wb, ck["numero_simulacao"], eixos_questoes)
+    ds.salvar_workbook(folder_id, wb)
+
+    config["simulacao_atual"] = ck["numero_simulacao"]
+    emd.salvar_config(folder_id, config)
+    gm.apagar_checkpoint(folder_id)
+
+    ck["resumo_reaproveitamento"] = resumo_reaproveitamento
+    return "concluido"
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -741,18 +902,105 @@ def pagina_gestao():
 
     st.divider()
 
-    # --- Confirmação em duas etapas antes de gerar (gasta créditos reais de API) ---
+    chave_ativa = f"geracao_ativa_{folder_id}"
+    chave_escolha = f"geracao_escolha_{folder_id}"
     chave_confirmar_geracao = f"confirmar_geracao_{folder_id}"
 
+    # --- Geração em andamento nesta sessão: processa um passo e continua sozinha ---
+    if st.session_state.get(chave_ativa):
+        ck = st.session_state[f"geracao_ck_{folder_id}"]
+        wb_geracao = st.session_state[f"geracao_wb_{folder_id}"]
+        config_geracao = st.session_state[f"geracao_config_{folder_id}"]
+
+        st.subheader(f"🎲 Gerando simulado nº {ck['numero_simulacao']}")
+        prontos, pendentes = gm.progresso_resumo(ck)
+        if prontos:
+            st.write(f"✅ Prontos: {', '.join(prontos)}")
+        if pendentes:
+            st.write(f"⏳ Faltam: {', '.join(pendentes)}")
+
+        if st.button("🛑 Cancelar geração"):
+            st.session_state[f"geracao_cancelar_{folder_id}"] = True
+
+        resultado = _passo_geracao(folder_id, config_geracao, wb_geracao, ck)
+
+        if resultado == "continuar":
+            st.rerun()
+
+        for chave in (chave_ativa, f"geracao_ck_{folder_id}", f"geracao_wb_{folder_id}",
+                      f"geracao_config_{folder_id}", f"geracao_cancelar_{folder_id}"):
+            st.session_state.pop(chave, None)
+        _resumo_estudos_cacheado.clear()
+
+        if resultado == "concluido":
+            st.session_state["estudo_config"] = config_geracao
+            st.success(f"✅ Simulado nº {ck['numero_simulacao']} concluído! Arquivo atualizado no Drive.")
+            resumo_reaproveitamento = ck.get("resumo_reaproveitamento") or []
+            if resumo_reaproveitamento:
+                with st.expander(f"♻️ {len(resumo_reaproveitamento)} tema(s) reaproveitado(s) de outros estudos"):
+                    for linha in resumo_reaproveitamento:
+                        st.write(f"- {linha}")
+        elif resultado == "cancelado":
+            st.warning(
+                "Geração cancelada. O progresso até aqui foi salvo — clique em "
+                "\"Gerar novo simulado\" de novo pra retomar de onde parou."
+            )
+        elif resultado == "erro":
+            st.error(
+                f"Geração interrompida: {ck['erro_mensagem']}. O progresso até "
+                f"aqui foi salvo — clique em \"Gerar novo simulado\" de novo pra retomar."
+            )
+        return
+
+    # --- Existe uma geração incompleta de antes: pergunta retomar ou zerar ---
+    if st.session_state.get(chave_escolha):
+        ck_pendente = st.session_state[chave_escolha]
+        prontos, pendentes = gm.progresso_resumo(ck_pendente)
+        st.warning(
+            f"Existe uma geração incompleta do simulado nº {ck_pendente['numero_simulacao']} "
+            f"(status anterior: {ck_pendente['status']}). "
+            f"Prontos: {', '.join(prontos) or '—'}. Faltam: {', '.join(pendentes) or '—'}."
+        )
+        col_retomar, col_zero = st.columns(2)
+        if col_retomar.button("▶️ Retomar de onde parou", type="primary"):
+            ck_pendente["status"] = "em_andamento"
+            ck_pendente["erro_mensagem"] = None
+            with st.spinner("Carregando planilha..."):
+                st.session_state[f"geracao_wb_{folder_id}"] = ds.baixar_workbook(folder_id)
+            st.session_state[f"geracao_ck_{folder_id}"] = ck_pendente
+            st.session_state[f"geracao_config_{folder_id}"] = config
+            st.session_state.pop(chave_escolha, None)
+            st.session_state[chave_ativa] = True
+            st.rerun()
+        if col_zero.button("🆕 Começar do zero (descarta o anterior)"):
+            gm.apagar_checkpoint(folder_id)
+            st.session_state.pop(chave_escolha, None)
+            st.session_state[chave_confirmar_geracao] = True
+            st.rerun()
+        return
+
+    # --- Confirmação em duas etapas antes de gerar (gasta créditos reais de API) ---
     if not st.session_state.get(chave_confirmar_geracao):
         if st.button("🎲 Gerar novo simulado", type="primary"):
-            st.session_state[chave_confirmar_geracao] = True
+            with st.spinner("Verificando se há geração pendente..."):
+                checkpoint_existente = gm.carregar_checkpoint(folder_id)
+            if checkpoint_existente and checkpoint_existente.get("status") in ("em_andamento", "erro", "cancelado"):
+                st.session_state[chave_escolha] = checkpoint_existente
+            else:
+                st.session_state[chave_confirmar_geracao] = True
             st.rerun()
     else:
         total_questoes_estudo = sum(d["qtd_questoes"] for d in config["eixos"].values())
         st.warning(
-            f"Isso vai gerar {total_questoes_estudo} questões novas via IA, "
+            f"Isso vai gerar até {total_questoes_estudo} questões novas via IA, "
             f"consumindo créditos reais da sua conta OpenAI. Confirma?"
+        )
+        meses_janela_reuso = st.slider(
+            "Reaproveitar conteúdo parecido de outros estudos gerado nos últimos quantos meses?",
+            min_value=1, max_value=12, value=6,
+            help="Antes de gerar um tema, o app procura em outros estudos (mesmo nível) "
+                 "um tema parecido dentro dessa janela de tempo, e reaproveita as "
+                 "questões em vez de chamar a IA de novo, economizando créditos.",
         )
         col_sim, col_nao = st.columns(2)
         confirmou = col_sim.button("Sim, gerar agora", type="primary")
@@ -763,54 +1011,14 @@ def pagina_gestao():
         if confirmou:
             st.session_state.pop(chave_confirmar_geracao, None)
             numero_simulacao = config["simulacao_atual"] + 1
-
-            with st.status(f"Gerando simulação nº {numero_simulacao}...", expanded=True) as status:
-                wb = ds.baixar_workbook(folder_id)
-                eixos_questoes = {}
-
-                for eixo, dados in config["eixos"].items():
-                    st.write(f"**{eixo}**")
-                    distribuicao = sorteio.distribuir_temas(config, eixo, dados["qtd_questoes"])
-
-                    blocos_eixo = []
-                    for tema, qtd_tema in distribuicao.items():
-                        evitar = em.perguntas_ja_usadas(wb, eixo, tema=tema, limite=30)
-                        st.write(f"  ↳ {qtd_tema} questão(ões) — {tema[:70]}")
-                        questoes = ia.gerar_bloco(
-                            banca=config["banca"], nivel=config["nivel"], tema=tema,
-                            qtd=qtd_tema, evitar=evitar, tamanho_bloco=dados.get("tamanho_bloco", 10),
-                        )
-                        if questoes:
-                            blocos_eixo.append((tema, questoes))
-                        else:
-                            st.write(f"  ⚠️ Falhou ao gerar: {tema}")
-
-                    todas_questoes_eixo = [q for _, qs in blocos_eixo for q in qs]
-                    if todas_questoes_eixo:
-                        ia.balancear_gabaritos(todas_questoes_eixo)
-
-                    if not blocos_eixo:
-                        st.write(f"  ⚠️ Nenhuma questão gerada para {eixo} — guia ficará vazia.")
-                        em.resetar_guia_eixo(wb, eixo)
-                        continue
-
-                    em.resetar_guia_eixo(wb, eixo)
-                    for tema, questoes in blocos_eixo:
-                        em.gravar_questoes_no_eixo(wb, eixo, tema, questoes)
-
-                    eixos_questoes[eixo] = blocos_eixo
-                    st.write(f"  ✓ {len(todas_questoes_eixo)} questões gravadas ({len(blocos_eixo)} temas).")
-
-                em.consolidar(wb, numero_simulacao, eixos_questoes)
-                ds.salvar_workbook(folder_id, wb)
-
-                config["simulacao_atual"] = numero_simulacao
-                emd.salvar_config(folder_id, config)
-                st.session_state["estudo_config"] = config
-
-                status.update(label=f"✅ Simulado nº {numero_simulacao} concluído!", state="complete")
-
-            st.success("Arquivo `simulado.xlsx` atualizado na pasta do estudo no seu Google Drive.")
+            with st.spinner("Carregando planilha..."):
+                st.session_state[f"geracao_wb_{folder_id}"] = ds.baixar_workbook(folder_id)
+            ck_novo = gm.checkpoint_iniciar(numero_simulacao)
+            ck_novo["meses_janela_reuso"] = meses_janela_reuso
+            st.session_state[f"geracao_ck_{folder_id}"] = ck_novo
+            st.session_state[f"geracao_config_{folder_id}"] = config
+            st.session_state[chave_ativa] = True
+            st.rerun()
 
 
 # =========================================================================

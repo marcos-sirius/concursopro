@@ -107,3 +107,53 @@ def perguntas_ja_usadas(wb: Workbook, eixo: str, tema: str = None, limite: int =
     recentes = encontradas[-limite:]
     resumidas = [" ".join(str(p).split()[:10]) + "..." for p in recentes]
     return resumidas
+
+
+def questoes_por_tema(wb: Workbook, eixo: str, tema: str) -> list:
+    """
+    Lê TODAS as questões já geradas pra esse (eixo, tema) — em qualquer
+    simulado desse estudo — direto do Consolidado. Usado só na hora de
+    REAPROVEITAR conteúdo pra outro estudo (banco_compartilhado_manager.py);
+    não faz parte do fluxo normal de geração.
+
+    Devolve no formato {"pergunta", "opcoes", "correta" (índice 0-4),
+    "comentario"} — o mesmo formato que gravar_questoes_no_eixo espera.
+    Não repete a mesma pergunta duas vezes, mesmo que ela apareça em vários
+    simulados antigos desse estudo.
+    """
+    if "Consolidado" not in wb.sheetnames:
+        return []
+    ws = wb["Consolidado"]
+    letras = ["A", "B", "C", "D", "E"]
+
+    encontradas = []
+    vistas = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[0] is None:
+            continue
+        eixo_row = row[1]
+        tema_row = row[10] if len(row) > 10 else None
+        if eixo_row != eixo or tema_row != tema:
+            continue
+
+        pergunta = row[2]
+        if not pergunta or pergunta in vistas:
+            continue
+        vistas.add(pergunta)
+
+        opcoes = [row[3], row[4], row[5], row[6], row[7]]
+        correta_valor = row[8]
+        comentario = row[9] if len(row) > 9 and row[9] is not None else ""
+
+        if isinstance(correta_valor, str) and correta_valor.strip().upper() in letras:
+            idx_correta = letras.index(correta_valor.strip().upper())
+        else:
+            idx_correta = int(correta_valor) if correta_valor is not None else 0
+
+        encontradas.append({
+            "pergunta": pergunta,
+            "opcoes": opcoes,
+            "correta": idx_correta,
+            "comentario": comentario,
+        })
+    return encontradas

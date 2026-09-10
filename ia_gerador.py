@@ -37,6 +37,11 @@ from openai import OpenAI, RateLimitError
 load_dotenv()
 
 MODEL = "gpt-5.6-terra"
+
+# Modelo separado, mais barato, só pra decisões simples de sim/não (ex:
+# "esses dois temas são parecidos o suficiente?") — não vale gastar o modelo
+# de geração de conteúdo pra uma pergunta binária.
+MODEL_COMPARACAO = "gpt-5.6-luna"
 MAX_TENTATIVAS = 5  # quantas vezes tenta regenerar questões rejeitadas por Python
 
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -191,9 +196,10 @@ REGRAS OBRIGATÓRIAS:
 # NÚCLEO DE REQUISIÇÃO
 # ============================================================
 
-def _responder_json(prompt: str, schema: dict, nome_schema: str, reasoning_effort: str = "medium") -> dict:
+def _responder_json(prompt: str, schema: dict, nome_schema: str, reasoning_effort: str = "medium",
+                     modelo: str = MODEL) -> dict:
     response = client.responses.create(
-        model=MODEL,
+        model=modelo,
         reasoning={"effort": reasoning_effort},
         input=prompt,
         max_output_tokens=8000,
@@ -405,3 +411,65 @@ def balancear_gabaritos(questoes: list) -> list:
     for q, pos in zip(questoes, posicoes):
         _embaralhar_questao(q, pos)
     return questoes
+
+
+# ============================================================
+# COMPARAÇÃO DE TEMAS (pra reaproveitamento entre estudos)
+# ============================================================
+
+SCHEMA_COMPARACAO = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "indice_parecido": {
+            "type": ["integer", "null"],
+        },
+        "justificativa": {"type": "string"},
+    },
+    "required": ["indice_parecido", "justificativa"],
+}
+
+
+def comparar_temas_similares(tema_novo: str, candidatos: list) -> int | None:
+    """
+    Pergunta (com o modelo mais barato) se algum dos temas candidatos é
+    parecido o suficiente com 'tema_novo' pra reaproveitar as mesmas
+    questões, em vez de gerar do zero. Devolve o ÍNDICE do candidato mais
+    parecido (posição na lista 'candidatos', 0-based) ou None se nenhum servir.
+    """
+    if not candidatos:
+        return None
+
+    lista_candidatos = "\n".join(f"{i}. {c}" for i, c in enumerate(candidatos))
+    prompt = f"""Você é um especialista em conteúdo programático de concursos públicos.
+
+TEMA NOVO (que precisa de questões):
+"{tema_novo}"
+
+TEMAS CANDIDATOS (de outros concursos, já com questões prontas):
+{lista_candidatos}
+
+Algum desses candidatos cobre o MESMO CONTEÚDO e a MESMA PROFUNDIDADE do
+tema novo, a ponto de as mesmas questões servirem sem soar deslocadas?
+Considere só equivalência de CONTEÚDO (ex: "Concordância verbal e nominal"
+e "5.5 Concordância verbal e nominal (regras gerais)" são o mesmo assunto).
+Seja rigoroso: na dúvida, prefira dizer que nenhum serve (responda null).
+
+Responda em JSON, com "indice_parecido" (o número do candidato mais
+parecido, ou null se nenhum servir de verdade) e "justificativa" (uma frase
+curta explicando a decisão)."""
+
+    resultado = _responder_json(
+        prompt=prompt,
+        schema=SCHEMA_COMPARACAO,
+        nome_schema="comparacao_temas",
+        reasoning_effort="low",
+        modelo=MODEL_COMPARACAO,
+    )
+
+    indice = resultado.get("indice_parecido")
+    if indice is None:
+        return None
+    if not isinstance(indice, int) or not (0 <= indice < len(candidatos)):
+        return None
+    return indice
