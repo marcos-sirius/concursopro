@@ -58,23 +58,50 @@ def salvar_bytes(nome: str, dados: bytes, parent_id: str, mime_type: str,
 
 def listar_estudos() -> list:
     """Lista as subpastas (cada uma = um estudo) dentro da pasta raiz."""
+    return listar_subpastas(root_folder_id())
+
+
+def listar_subpastas(parent_id: str) -> list:
+    """Versão genérica de listar_estudos, reutilizável para qualquer pasta."""
     service = dsvc.obter_service()
     resp = service.files().list(
-        q=f"'{root_folder_id()}' in parents and mimeType = '{MIME_FOLDER}' and trashed = false",
+        q=f"'{parent_id}' in parents and mimeType = '{MIME_FOLDER}' and trashed = false",
         fields="files(id, name)",
     ).execute()
     return sorted(resp.get("files", []), key=lambda f: f["name"])
 
 
-def obter_ou_criar_pasta_estudo(slug: str) -> str:
-    existente = _buscar(slug, root_folder_id(), MIME_FOLDER)
+def listar_arquivos(parent_id: str, apenas_extensao: str | None = None) -> list:
+    """Lista arquivos (não-pasta) soltos dentro de uma pasta."""
+    service = dsvc.obter_service()
+    q = f"'{parent_id}' in parents and mimeType != '{MIME_FOLDER}' and trashed = false"
+    resp = service.files().list(q=q, fields="files(id, name)").execute()
+    arquivos = resp.get("files", [])
+    if apenas_extensao:
+        arquivos = [a for a in arquivos if a["name"].endswith(apenas_extensao)]
+    return arquivos
+
+
+def obter_ou_criar_subpasta(nome: str, parent_id: str) -> str:
+    """Versão genérica: acha ou cria uma subpasta com esse nome dentro de QUALQUER pasta pai."""
+    existente = _buscar(nome, parent_id, MIME_FOLDER)
     if existente:
         return existente["id"]
 
     service = dsvc.obter_service()
-    metadata = {"name": slug, "mimeType": MIME_FOLDER, "parents": [root_folder_id()]}
+    metadata = {"name": nome, "mimeType": MIME_FOLDER, "parents": [parent_id]}
     criado = service.files().create(body=metadata, fields="id").execute()
     return criado["id"]
+
+
+def obter_ou_criar_pasta_estudo(slug: str) -> str:
+    return obter_ou_criar_subpasta(slug, root_folder_id())
+
+
+def mover_para_lixeira(file_id: str):
+    """Move um arquivo OU pasta (com tudo dentro) para a lixeira do Drive — não é exclusão permanente."""
+    service = dsvc.obter_service()
+    service.files().update(fileId=file_id, body={"trashed": True}).execute()
 
 
 def _baixar_bytes(file_id: str) -> bytes:

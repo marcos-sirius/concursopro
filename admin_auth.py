@@ -10,6 +10,8 @@ simulado não passa por essa tela.
 
 Configuração: st.secrets["admin_password"] = "sua-senha-aqui"
 """
+import hmac
+
 import streamlit as st
 
 
@@ -21,7 +23,11 @@ def tela_login():
     st.subheader("🔒 Área de gestão")
     senha = st.text_input("Senha de administrador", type="password")
     if st.button("Entrar"):
-        if senha == st.secrets.get("admin_password", ""):
+        # hmac.compare_digest em vez de "==" simples: evita "timing attack"
+        # (alguém medindo quanto tempo a comparação leva pra descobrir a
+        # senha caractere por caractere). Risco baixíssimo pra esse uso
+        # pessoal, mas é de graça pra implementar.
+        if hmac.compare_digest(senha, st.secrets.get("admin_password", "")):
             st.session_state["admin_ok"] = True
             st.rerun()
         else:
