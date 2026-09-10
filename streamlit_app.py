@@ -274,29 +274,56 @@ def pagina_responder():
         st.session_state[chave_questoes] = rm.carregar_questoes_da_simulacao(wb, numero_simulacao)
     questoes = st.session_state[chave_questoes]
 
+    # --- Carrega rascunho salvo (se houver) pra pré-marcar as respostas ---
+    chave_rascunho = f"rascunho_{folder_id}_{numero_simulacao}"
+    if chave_rascunho not in st.session_state:
+        with st.spinner("Verificando se há progresso salvo..."):
+            st.session_state[chave_rascunho] = rm.buscar_rascunho(
+                folder_id, numero_simulacao, participante["usuario"]
+            )
+    rascunho = st.session_state[chave_rascunho]
+    indices_salvos = rascunho["respostas_indices"] if rascunho else [None] * len(questoes)
+
     st.divider()
 
-    # Formulário de verdade: os widgets só disparam recálculo quando o botão
-    # de envio é clicado, em vez de reprocessar tudo a cada resposta marcada
+    if rascunho:
+        st.info(f"📝 Continuando de onde você parou (progresso salvo em {rascunho['timestamp']}).")
+
+    # Formulário de verdade: os widgets só disparam recálculo quando um dos
+    # botões é clicado, em vez de reprocessar tudo a cada resposta marcada
     # (mais econômico em chamadas/recursos, abriu mão do progresso ao vivo
     # de propósito por causa disso).
     with st.form("form_respostas"):
         for i, q in enumerate(questoes):
             st.markdown(f"**{i + 1}. {q['pergunta']}**")
             opcoes_exibidas = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
+            indice_padrao = indices_salvos[i] if i < len(indices_salvos) else None
             st.radio(
                 f"resposta_{i}", opcoes_exibidas, key=f"resp_{i}",
-                label_visibility="collapsed", index=None,
+                label_visibility="collapsed", index=indice_padrao,
             )
         st.write("")
-        enviar = st.form_submit_button("Enviar respostas", type="primary")
+        col_rascunho, col_enviar = st.columns(2)
+        salvar_progresso = col_rascunho.form_submit_button("💾 Salvar progresso")
+        enviar = col_enviar.form_submit_button("✅ Enviar respostas", type="primary")
+
+    # --- Extrai os índices marcados agora (vale tanto pra salvar rascunho
+    # quanto pra enviar de vez — os dois botões disparam o mesmo form) ---
+    indices_atuais = []
+    for i, q in enumerate(questoes):
+        opcoes_exibidas_i = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
+        valor_selecionado = st.session_state.get(f"resp_{i}")
+        indices_atuais.append(opcoes_exibidas_i.index(valor_selecionado) if valor_selecionado else None)
+
+    if salvar_progresso:
+        with st.spinner("Salvando progresso..."):
+            rm.salvar_rascunho(folder_id, numero_simulacao, participante["usuario"], indices_atuais)
+        respondidas = sum(1 for v in indices_atuais if v is not None)
+        st.success(f"Progresso salvo ({respondidas}/{len(questoes)} respondidas). Pode fechar e continuar depois.")
+        st.session_state.pop(chave_rascunho, None)  # força recarregar na próxima renderização
 
     if enviar:
-        respostas_usuario = {}
-        for i, q in enumerate(questoes):
-            opcoes_exibidas_i = [f"{LETRAS[j]}) {op}" for j, op in enumerate(q["opcoes"])]
-            valor_selecionado = st.session_state.get(f"resp_{i}")
-            respostas_usuario[i] = opcoes_exibidas_i.index(valor_selecionado) if valor_selecionado else None
+        respostas_usuario = dict(enumerate(indices_atuais))
 
         nao_respondidas = [i + 1 for i, v in respostas_usuario.items() if v is None]
         if nao_respondidas:
@@ -311,6 +338,7 @@ def pagina_responder():
             resultado = rm.gravar_resposta_participante(
                 folder_id, numero_simulacao, participante["usuario"], respostas_completas
             )
+            rm.apagar_rascunho(folder_id, numero_simulacao, participante["usuario"])
 
         acertos, total = resultado["acertos"], resultado["total"]
         percentual = acertos / total if total else 0
@@ -336,9 +364,10 @@ def pagina_responder():
                     st.caption(comentario)
                 st.write("")
 
-        # limpa o cache local de "já respondeu" pra próxima vez que abrir essa tela
+        # limpa os caches locais pra próxima vez que abrir essa tela
         st.session_state.pop(chave_ja_respondeu, None)
         st.session_state.pop(chave_confirmou_reenvio, None)
+        st.session_state.pop(chave_rascunho, None)
 
 
 # =========================================================================

@@ -99,6 +99,56 @@ def buscar_resposta_existente(folder_id_estudo: str, numero_simulacao: int, usua
     return json.loads(dados.decode("utf-8"))
 
 
+# ---------------- rascunho (progresso salvo, ainda não enviado) ----------------
+
+def _nome_arquivo_rascunho(numero_simulacao: int, usuario: str) -> str:
+    return f"rascunho_sim{numero_simulacao}_{cm.slugify(usuario)}.json"
+
+
+def buscar_rascunho(folder_id_estudo: str, numero_simulacao: int, usuario: str) -> dict | None:
+    """
+    Progresso salvo manualmente (botão "Salvar progresso"), ainda não
+    enviado como resposta final. None se não houver rascunho.
+    """
+    pasta = _pasta_respostas(folder_id_estudo)
+    nome = _nome_arquivo_rascunho(numero_simulacao, usuario)
+    arquivo = ds.buscar_arquivo(nome, pasta)
+    if not arquivo:
+        return None
+    dados = ds.baixar_bytes(arquivo["id"])
+    return json.loads(dados.decode("utf-8"))
+
+
+def salvar_rascunho(folder_id_estudo: str, numero_simulacao: int, usuario: str, respostas_indices: list):
+    """
+    respostas_indices: lista paralela às questões — cada item é o índice
+    (0-4) da alternativa marcada, ou None se ainda não respondida.
+    Só é chamado quando a pessoa clica em "Salvar progresso" — não a cada
+    clique de resposta, de propósito, pra não gastar chamadas do Drive à toa.
+    """
+    payload = {
+        "usuario": usuario,
+        "simulacao": numero_simulacao,
+        "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "respostas_indices": respostas_indices,
+    }
+    pasta = _pasta_respostas(folder_id_estudo)
+    nome = _nome_arquivo_rascunho(numero_simulacao, usuario)
+    existente = ds.buscar_arquivo(nome, pasta)
+    dados = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ds.salvar_bytes(nome, dados, pasta, "application/json",
+                     file_id=existente["id"] if existente else None)
+
+
+def apagar_rascunho(folder_id_estudo: str, numero_simulacao: int, usuario: str):
+    """Chamado depois de um envio final bem-sucedido, pra não deixar rascunho velho pra trás."""
+    pasta = _pasta_respostas(folder_id_estudo)
+    nome = _nome_arquivo_rascunho(numero_simulacao, usuario)
+    arquivo = ds.buscar_arquivo(nome, pasta)
+    if arquivo:
+        ds.mover_para_lixeira(arquivo["id"])
+
+
 def gravar_resposta_participante(folder_id_estudo: str, numero_simulacao: int, usuario: str, respostas: list) -> dict:
     """
     respostas: [{"eixo","tema","pergunta","opcoes","correta","resposta_idx"}, ...]
@@ -141,15 +191,17 @@ def gravar_resposta_participante(folder_id_estudo: str, numero_simulacao: int, u
 
 def carregar_todos_resultados(folder_id_estudo: str) -> list:
     """
-    Lê TODOS os arquivos de resposta do estudo e devolve no mesmo formato
-    "uma linha por questão respondida" de antes, pra não precisar mudar a
-    lógica do dashboard de Desempenho.
+    Lê TODOS os arquivos de resposta FINAL do estudo (ignora rascunhos —
+    "rascunho_*.json" — que não têm gabarito conferido ainda) e devolve no
+    mesmo formato "uma linha por questão respondida" de antes.
     """
     pasta = _pasta_respostas(folder_id_estudo)
     arquivos = ds.listar_arquivos(pasta, apenas_extensao=".json")
 
     linhas = []
     for arq in arquivos:
+        if not arq["name"].startswith("resposta_"):
+            continue  # pula rascunhos
         dados = json.loads(ds.baixar_bytes(arq["id"]).decode("utf-8"))
         for r in dados.get("respostas", []):
             linhas.append({
