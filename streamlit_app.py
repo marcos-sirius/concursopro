@@ -50,6 +50,7 @@ import drive_storage as ds
 import estudo_manager_drive as emd
 import excel_manager as em
 import ia_gerador as ia
+import categorias_manager as cat
 import participantes_manager as pm
 import resultados_manager as rm
 import sorteio
@@ -175,6 +176,11 @@ def _resumo_estudos_cacheado():
     estudos = emd.listar_estudos()
     resumo = emd.carregar_resumo_estudos(estudos)
     return estudos, resumo
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _categorias_cacheadas():
+    return cat.carregar_categorias()
 
 
 # =========================================================================
@@ -379,7 +385,18 @@ def pagina_gestao():
         _erro_drive_amigavel(e)
         return
     nomes_estudos = [n for n, _ in estudos]
-    categorias_existentes = emd.listar_categorias(resumo_estudos)
+
+    with st.spinner("Carregando categorias..."):
+        try:
+            categorias_cadastradas = _categorias_cacheadas()
+        except Exception as e:
+            _erro_drive_amigavel(e)
+            categorias_cadastradas = []
+
+    # União com categorias que já estão em uso por algum estudo, mesmo que
+    # tenham sido removidas do cadastro (ou sejam de estudos antigos, tipo o
+    # "Geral" automático) — pra nenhum seletor quebrar por falta de opção.
+    categorias_existentes = sorted(set(categorias_cadastradas) | set(emd.listar_categorias(resumo_estudos)))
 
     with st.spinner("Carregando participantes..."):
         try:
@@ -505,6 +522,58 @@ def pagina_gestao():
         else:
             st.caption("Nenhum participante cadastrado ainda.")
 
+    with st.expander("🏷️ Gerenciar categorias"):
+        st.caption(
+            "Categorias organizam os estudos em grupos (ex: Analista de "
+            "Dados, Contador, Psicóloga). Cadastre aqui antes de criar um "
+            "estudo novo, ou antes de liberar acesso por categoria inteira "
+            "pra um participante."
+        )
+
+        with st.form("form_nova_categoria"):
+            nome_nova_categoria = st.text_input("Nova categoria")
+            adicionar_cat = st.form_submit_button("Adicionar categoria")
+
+        if adicionar_cat:
+            with st.status(f"Adicionando '{nome_nova_categoria}'...", expanded=True) as status_cat:
+                try:
+                    cat.adicionar_categoria(nome_nova_categoria)
+                    status_cat.update(label="✅ Categoria adicionada!", state="complete")
+                    _categorias_cacheadas.clear()
+                    st.session_state["msg_sucesso"] = f"Categoria '{nome_nova_categoria}' adicionada."
+                    st.rerun()
+                except ValueError as e:
+                    status_cat.update(label="❌ Não foi possível adicionar.", state="error")
+                    st.error(str(e))
+                except Exception as e:
+                    status_cat.update(label="❌ Erro inesperado.", state="error")
+                    _erro_drive_amigavel(e)
+
+        if categorias_cadastradas:
+            contagem_por_categoria = {}
+            for r in resumo_estudos:
+                contagem_por_categoria[r["categoria"]] = contagem_por_categoria.get(r["categoria"], 0) + 1
+
+            st.write("**Categorias cadastradas:**")
+            for i, nome_cat in enumerate(categorias_cadastradas):
+                qtd = contagem_por_categoria.get(nome_cat, 0)
+                col_info, col_botao = st.columns([4, 1])
+                with col_info:
+                    st.write(f"- **{nome_cat}** ({qtd} estudo(s) usando)")
+                with col_botao:
+                    if st.button("Remover", key=f"remover_categoria_{i}_{nome_cat}"):
+                        with st.status(f"Removendo '{nome_cat}'...", expanded=True) as status_rc:
+                            cat.remover_categoria(nome_cat)
+                            status_rc.update(label="✅ Removida da lista!", state="complete")
+                        _categorias_cacheadas.clear()
+                        st.session_state["msg_sucesso"] = (
+                            f"Categoria '{nome_cat}' removida da lista de opções "
+                            f"(estudos que já usavam ela continuam com esse valor)."
+                        )
+                        st.rerun()
+        else:
+            st.caption("Nenhuma categoria cadastrada ainda.")
+
     opcoes = ["➕ Novo estudo"] + nomes_estudos
 
     # se acabamos de criar um estudo, já abre a página nele em vez de
@@ -518,17 +587,15 @@ def pagina_gestao():
     escolha = st.selectbox("Estudo", opcoes, index=indice_padrao)
 
     if escolha == "➕ Novo estudo":
-        # A escolha de categoria fica FORA do st.form de propósito: campos
-        # dentro de um form não reagem uns aos outros até o envio, então a
-        # caixa de texto "nova categoria" nunca apareceria de verdade se
-        # estivesse lá dentro (bug corrigido).
-        opcoes_categoria = categorias_existentes + ["➕ Nova categoria..."]
-        categoria_escolhida_form = st.selectbox("Categoria", opcoes_categoria, key="nova_categoria_estudo_select")
-        nova_categoria_texto = ""
-        if categoria_escolhida_form == "➕ Nova categoria...":
-            nova_categoria_texto = st.text_input(
-                "Nome da nova categoria (ex: Contador, Psicóloga)", key="nova_categoria_estudo_texto"
+        if not categorias_cadastradas:
+            st.warning(
+                "Nenhuma categoria cadastrada ainda. Abra \"🏷️ Gerenciar "
+                "categorias\" acima e cadastre pelo menos uma antes de criar "
+                "um estudo novo."
             )
+            return
+
+        categoria_escolhida_form = st.selectbox("Categoria", categorias_cadastradas, key="nova_categoria_estudo_select")
 
         with st.form("form_novo_estudo"):
             nome_estudo = st.text_input("Nome do estudo/concurso")
@@ -538,13 +605,8 @@ def pagina_gestao():
             enviar = st.form_submit_button("Criar estudo")
 
         if enviar:
-            categoria_final = (
-                nova_categoria_texto.strip()
-                if categoria_escolhida_form == "➕ Nova categoria..."
-                else categoria_escolhida_form
-            )
-            if not (nome_estudo and banca and nivel and arquivo_excel and categoria_final):
-                st.error("Preencha todos os campos (inclusive a categoria) e envie o Excel de conteúdo programático.")
+            if not (nome_estudo and banca and nivel and arquivo_excel):
+                st.error("Preencha todos os campos e envie o Excel de conteúdo programático.")
                 return
             try:
                 eixos = cl.carregar_conteudo_programatico(arquivo_excel)
@@ -553,7 +615,7 @@ def pagina_gestao():
                 return
 
             try:
-                config, folder_id = emd.criar_estudo(nome_estudo, banca, nivel, eixos, categoria_final)
+                config, folder_id = emd.criar_estudo(nome_estudo, banca, nivel, eixos, categoria_escolhida_form)
             except ValueError as e:
                 st.error(str(e))
                 return
@@ -581,35 +643,27 @@ def pagina_gestao():
 
     st.subheader(config["nome_estudo"])
     st.caption(
-        f"Categoria: {config.get('categoria', emd.CATEGORIA_PADRAO)} · "
+        f"Categoria: {config.get('categoria', cat.CATEGORIA_PADRAO)} · "
         f"Banca: {config['banca']} · Nível: {config['nivel']} · "
         f"Simulações já geradas: {config['simulacao_atual']}"
     )
 
     with st.expander("🏷️ Trocar categoria deste estudo"):
-        opcoes_categoria_edicao = categorias_existentes + ["➕ Nova categoria..."]
-        categoria_atual = config.get("categoria", emd.CATEGORIA_PADRAO)
-        indice_atual = (
-            opcoes_categoria_edicao.index(categoria_atual)
-            if categoria_atual in opcoes_categoria_edicao else 0
-        )
+        # Sempre inclui a categoria ATUAL do estudo nas opções, mesmo que ela
+        # já tenha sido removida do cadastro (ex: um "Geral" automático de
+        # estudo antigo) — evita erro de índice e não muda nada sem querer.
+        categoria_atual = config.get("categoria", cat.CATEGORIA_PADRAO)
+        opcoes_categoria_edicao = sorted(set(categorias_cadastradas) | {categoria_atual})
+        indice_atual = opcoes_categoria_edicao.index(categoria_atual)
+
         nova_escolha = st.selectbox("Categoria", opcoes_categoria_edicao, index=indice_atual, key="editar_categoria_select")
-        nova_categoria_texto_edicao = ""
-        if nova_escolha == "➕ Nova categoria...":
-            nova_categoria_texto_edicao = st.text_input("Nome da nova categoria", key="editar_categoria_novo_texto")
 
         if st.button("Salvar categoria"):
-            categoria_final_edicao = (
-                nova_categoria_texto_edicao.strip() if nova_escolha == "➕ Nova categoria..." else nova_escolha
-            )
-            if not categoria_final_edicao:
-                st.error("Informe o nome da categoria.")
-            else:
-                config = emd.atualizar_categoria(folder_id, config, categoria_final_edicao)
-                st.session_state["estudo_config"] = config
-                _resumo_estudos_cacheado.clear()
-                st.session_state["msg_sucesso"] = f"Categoria atualizada para '{categoria_final_edicao}'."
-                st.rerun()
+            config = emd.atualizar_categoria(folder_id, config, nova_escolha)
+            st.session_state["estudo_config"] = config
+            _resumo_estudos_cacheado.clear()
+            st.session_state["msg_sucesso"] = f"Categoria atualizada para '{nova_escolha}'."
+            st.rerun()
 
     with st.expander("🔄 Ressincronizar eixos/temas a partir de um novo Excel"):
         novo_arquivo = st.file_uploader("Excel atualizado", type=["xlsx"], key="resync_uploader")
