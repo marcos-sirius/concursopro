@@ -121,6 +121,19 @@ def _aplicar_estilo_visual():
         background-image: linear-gradient(90deg, #6C5CE7, #A29BFE);
         border-radius: 8px;
     }
+
+    /* fixa a barra de botões (Salvar progresso / Enviar respostas) no
+       rodapé enquanto rola a tela pelas questões — só posicionamento
+       visual (CSS puro), não afeta quando o app reprocessa nada.
+       "background-color: inherit" acompanha o tema ativo automaticamente. */
+    .st-key-botoes_envio_fixos {
+        position: sticky;
+        bottom: 0;
+        z-index: 999;
+        background-color: inherit;
+        padding: 0.6rem 0;
+        box-shadow: 0 -4px 10px rgba(128, 128, 128, 0.18);
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -303,9 +316,10 @@ def pagina_responder():
                 label_visibility="collapsed", index=indice_padrao,
             )
         st.write("")
-        col_rascunho, col_enviar = st.columns(2)
-        salvar_progresso = col_rascunho.form_submit_button("💾 Salvar progresso")
-        enviar = col_enviar.form_submit_button("✅ Enviar respostas", type="primary")
+        with st.container(key="botoes_envio_fixos"):
+            col_rascunho, col_enviar = st.columns(2)
+            salvar_progresso = col_rascunho.form_submit_button("💾 Salvar progresso")
+            enviar = col_enviar.form_submit_button("✅ Enviar respostas", type="primary")
 
     # --- Extrai os índices marcados agora (vale tanto pra salvar rascunho
     # quanto pra enviar de vez — os dois botões disparam o mesmo form) ---
