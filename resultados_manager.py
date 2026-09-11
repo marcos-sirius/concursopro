@@ -216,3 +216,64 @@ def carregar_todos_resultados(folder_id_estudo: str) -> list:
                 "acertou": r["acertou"],
             })
     return linhas
+
+
+# ---------------- critérios de aprovação (nota de corte do edital) ----------------
+
+def avaliar_criterios_aprovacao(criterios: dict | None, respostas_completas: list) -> dict | None:
+    """
+    Confere o desempenho de UMA tentativa contra os critérios de aprovação
+    do edital (grupos com percentual mínimo + "não pode zerar" + percentual
+    geral mínimo). Devolve None se o estudo não tiver critérios cadastrados.
+
+    respostas_completas: [{"eixo","tema","pergunta","opcoes","correta","resposta_idx"}, ...]
+    (mesmo formato usado por gravar_resposta_participante)
+    """
+    if not criterios or not criterios.get("grupos"):
+        return None
+
+    por_eixo = {}
+    for r in respostas_completas:
+        d = por_eixo.setdefault(r["eixo"], {"acertos": 0, "total": 0})
+        d["total"] += 1
+        if r["resposta_idx"] == r["correta"]:
+            d["acertos"] += 1
+
+    motivos = []
+    resumo_grupos = []
+
+    for grupo in criterios["grupos"]:
+        acertos_grupo = sum(por_eixo.get(e, {"acertos": 0})["acertos"] for e in grupo["eixos"])
+        total_grupo = sum(por_eixo.get(e, {"total": 0})["total"] for e in grupo["eixos"])
+        pct_grupo = (acertos_grupo / total_grupo * 100) if total_grupo else 0.0
+
+        resumo_grupos.append({
+            "nome": grupo["nome"], "acertos": acertos_grupo, "total": total_grupo, "percentual": pct_grupo,
+        })
+
+        if grupo.get("nao_pode_zerar_eixo"):
+            for eixo in grupo["eixos"]:
+                dados_eixo = por_eixo.get(eixo, {"acertos": 0, "total": 0})
+                if dados_eixo["total"] > 0 and dados_eixo["acertos"] == 0:
+                    motivos.append(f'Zerou em "{eixo}" (grupo "{grupo["nome"]}")')
+
+        if pct_grupo < grupo["percentual_minimo"]:
+            motivos.append(
+                f'"{grupo["nome"]}" ficou em {pct_grupo:.0f}% '
+                f'(mínimo exigido: {grupo["percentual_minimo"]:.0f}%)'
+            )
+
+    total_geral = sum(d["total"] for d in por_eixo.values())
+    acertos_geral = sum(d["acertos"] for d in por_eixo.values())
+    pct_geral = (acertos_geral / total_geral * 100) if total_geral else 0.0
+
+    pct_min_geral = criterios.get("percentual_minimo_geral")
+    if pct_min_geral is not None and pct_geral < pct_min_geral:
+        motivos.append(f"Percentual geral ficou em {pct_geral:.0f}% (mínimo exigido: {pct_min_geral:.0f}%)")
+
+    return {
+        "aprovado": len(motivos) == 0,
+        "motivos_reprovacao": motivos,
+        "resumo_grupos": resumo_grupos,
+        "percentual_geral": pct_geral,
+    }

@@ -535,11 +535,53 @@ def pagina_responder():
         percentual = acertos / total if total else 0
         st.success(f"✅ Respostas enviadas! Você acertou {acertos}/{total} ({percentual:.0%}).")
 
-        # celebração visual, variando com o desempenho
-        if percentual >= 0.8:
+        # --- Veredito contra os critérios de aprovação do edital (se cadastrados) ---
+        try:
+            config_do_estudo = emd.carregar_config(folder_id)
+            veredito = rm.avaliar_criterios_aprovacao(
+                config_do_estudo.get("criterios_aprovacao"), respostas_completas
+            )
+        except Exception:
+            veredito = None  # não trava a entrega da resposta por causa disso
+
+        # --- Celebração visual, combinando critérios de aprovação + percentual ---
+        # Troféu: só quando bate os DOIS ao mesmo tempo (cumpriu o critério do
+        # edital E fez 80%+ no geral) — se o estudo não tem critério cadastrado,
+        # não existe "requisito" bloqueando, então o percentual sozinho decide.
+        aprovado_ou_sem_criterio = veredito["aprovado"] if veredito else True
+
+        if aprovado_ou_sem_criterio and percentual >= 0.8:
             st.balloons()
+            st.markdown(
+                "<h3 style='color:#C9A15A; margin-top:0;'>🏆 Troféu de Aprovação!</h3>"
+                "<p style='color:#B8B2A6; margin-top:-8px;'>"
+                "Você cumpriu os critérios do edital e teve um desempenho de alto nível.</p>",
+                unsafe_allow_html=True,
+            )
         elif percentual >= 0.5:
-            st.snow()
+            st.markdown(
+                "<h4 style='color:#C9A15A; margin-top:0;'>🥈 Bom desempenho!</h4>"
+                "<p style='color:#B8B2A6; margin-top:-6px;'>Você está no caminho certo.</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<h4 style='margin-top:0;'>📘 Continue treinando!</h4>"
+                "<p style='color:#B8B2A6; margin-top:-6px;'>Cada simulado te deixa mais preparado.</p>",
+                unsafe_allow_html=True,
+            )
+
+        if veredito:
+            if veredito["aprovado"]:
+                st.success("🎯 Você atingiria os critérios de aprovação deste edital neste simulado!")
+            else:
+                st.error("🎯 Você NÃO atingiria os critérios de aprovação deste edital neste simulado.")
+                for motivo in veredito["motivos_reprovacao"]:
+                    st.write(f"- {motivo}")
+            with st.expander("Ver detalhamento por grupo"):
+                for g in veredito["resumo_grupos"]:
+                    st.write(f"**{g['nome']}**: {g['acertos']}/{g['total']} ({g['percentual']:.0f}%)")
+                st.write(f"**Geral (todos os eixos)**: {veredito['percentual_geral']:.0f}%")
 
         with st.expander("Ver gabarito comentado", expanded=True):
             for i, r in enumerate(respostas_completas):
@@ -863,6 +905,78 @@ def pagina_gestao():
             st.session_state["estudo_config"] = config
             _resumo_estudos_cacheado.clear()
             st.session_state["msg_sucesso"] = f"Categoria atualizada para '{nova_escolha}'."
+            st.rerun()
+
+    with st.expander("🎯 Critérios de aprovação"):
+        st.caption(
+            "Reproduz a nota de corte do edital: grupos de eixos com percentual "
+            "mínimo, opção de não zerar nenhum eixo do grupo, e um percentual "
+            "mínimo geral (soma ponderada de TODOS os eixos). Deixe sem nenhum "
+            "grupo se esse estudo não tiver critério de corte."
+        )
+
+        chave_grupos = f"criterios_grupos_{folder_id}"
+        if chave_grupos not in st.session_state:
+            criterios_atuais = config.get("criterios_aprovacao") or {}
+            st.session_state[chave_grupos] = [dict(g) for g in criterios_atuais.get("grupos", [])]
+        grupos_edicao = st.session_state[chave_grupos]
+
+        nomes_eixos_disponiveis = list(config["eixos"].keys())
+
+        for i, grupo in enumerate(grupos_edicao):
+            with st.container(border=True):
+                col_nome, col_remover = st.columns([4, 1])
+                grupo["nome"] = col_nome.text_input(
+                    "Nome do grupo", value=grupo.get("nome", ""), key=f"grupo_nome_{folder_id}_{i}",
+                )
+                with col_remover:
+                    st.write("")
+                    if st.button("🗑️", key=f"grupo_remover_{folder_id}_{i}"):
+                        grupos_edicao.pop(i)
+                        st.rerun()
+                grupo["eixos"] = st.multiselect(
+                    "Eixos deste grupo", nomes_eixos_disponiveis,
+                    default=[e for e in grupo.get("eixos", []) if e in nomes_eixos_disponiveis],
+                    key=f"grupo_eixos_{folder_id}_{i}",
+                )
+                grupo["percentual_minimo"] = st.number_input(
+                    "Percentual mínimo do grupo (%)", min_value=0, max_value=100,
+                    value=int(grupo.get("percentual_minimo", 50)), key=f"grupo_pct_{folder_id}_{i}",
+                )
+                grupo["nao_pode_zerar_eixo"] = st.checkbox(
+                    "Não pode zerar (0 acertos) em nenhum eixo deste grupo",
+                    value=grupo.get("nao_pode_zerar_eixo", True), key=f"grupo_zero_{folder_id}_{i}",
+                )
+
+        if st.button("➕ Adicionar grupo"):
+            grupos_edicao.append({
+                "nome": "", "eixos": [], "percentual_minimo": 50, "nao_pode_zerar_eixo": True,
+            })
+            st.rerun()
+
+        st.divider()
+        criterios_atuais = config.get("criterios_aprovacao") or {}
+        usar_geral = st.checkbox(
+            "Aplicar percentual mínimo GERAL (soma ponderada de todos os eixos)",
+            value=criterios_atuais.get("percentual_minimo_geral") is not None,
+        )
+        percentual_geral = st.number_input(
+            "Percentual mínimo geral (%)", min_value=0, max_value=100,
+            value=int(criterios_atuais.get("percentual_minimo_geral") or 45),
+            disabled=not usar_geral,
+        )
+
+        if st.button("💾 Salvar critérios", type="primary"):
+            grupos_validos = [g for g in grupos_edicao if g["nome"].strip() and g["eixos"]]
+            novos_criterios = {
+                "grupos": grupos_validos,
+                "percentual_minimo_geral": percentual_geral if usar_geral else None,
+            }
+            config["criterios_aprovacao"] = novos_criterios
+            emd.salvar_config(folder_id, config)
+            st.session_state["estudo_config"] = config
+            st.session_state.pop(chave_grupos, None)
+            st.success("Critérios de aprovação salvos!")
             st.rerun()
 
     with st.expander("🔄 Ressincronizar eixos/temas a partir de um novo Excel"):
